@@ -153,6 +153,11 @@ static uint8_t last_numSat = 0;
 static int32_t last_lat_e7 = 0;
 static int32_t last_lon_e7 = 0;
 
+/* Flight-mode flags from MSP_STATUS. Zero until the first response, so the
+ * mode widget can show that it does not know rather than guessing. */
+static uint32_t last_fm_flags = 0;
+static int last_fm_seen = 0;
+
 /* Battery and link, from MSP_CMD_BATTERY_STATE and MSP_ANALOG. The pixel OSD
  * needs values rather than the character cells DisplayPort would hand us. */
 static uint16_t last_vbat_cv = 0;     /* centivolts */
@@ -259,6 +264,8 @@ extern bool monitor_wfb;
 extern int last_board_temp;
 
 void fill(char *str);
+/* Defined below with the pixel bridge; used earlier by the text renderer. */
+int px_osd_active(void);
 void SetOSDMsg(char *msg);
 
 // in milliseconds
@@ -472,6 +479,9 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	case MSP_CMD_STATUS: {
 		// we need the armed state
 		armed = (msp_message->payload[6] & 0x01);
+		/* Full flight-mode flags, for the pixel OSD's mode widget. */
+		last_fm_flags = *(uint32_t *)&msp_message->payload[6];
+		last_fm_seen = 1;
 		if (armed)
 			vtxMenuActive = false;
 		break;
@@ -1839,12 +1849,19 @@ static char font[256];
 		int L[20]={0}, F[20]={0};  // Support up to 20 lines
 
 		if (strstr(out, "&")) {
-			//Allow for color and size setting per line, must be here since the fill() function will strip that info 			
+			//Allow for color and size setting per line, must be here since the fill() function will strip that info
 			if (DrawOSD)//Only on the air unit
     			parse_LF(out, L, F, 20);
 
 			fill(out);
 			osds[FULL_OVERLAY_ID].updt = 0; //
+
+			/* Pixel OSD: keep the SUBSTITUTED line as the datalink source.
+			 * The raw file carries &B/&C/&T/&W placeholders - bitrate, CPU,
+			 * temperatures - that fill() resolves; parsed raw they read as
+			 * zeros, which is exactly what the widgets then showed. */
+			if (px_osd_active() && !DrawOSD)
+				snprintf(osdmsg, MAX_STATUS_MSG_LEN, "%s", out);
 		}
 
 		// rendering text on goke  makes the program crash?! Need to fix.
@@ -1869,12 +1886,6 @@ static char font[256];
 			// printf("Sent text msg(%d): %s\n", msglen, out);
 			return false;
 		}
-
-		/* Pixel OSD active: the file has been read into `osdmsg` (which is
-		 * all px_osd_fill needs) - stop before rendering the character-era
-		 * text block on top of the pixel widgets showing the same figures. */
-		if (px_osd_active() && !DrawOSD)
-			return false;
 
 		if (access(font, F_OK)) // no font file
 			return false;
@@ -1979,6 +1990,13 @@ static char font[256];
 			bitmapText.enPixelFormat = PIXEL_FORMAT_DEFAULT; // E_MI_RGN_PIXEL_FORMAT_I8; //I8
 		}
 	}
+
+	/* Pixel OSD active: stop before the every-frame blit below - it would
+	 * paint the character-era text block over the pixel widgets. Everything
+	 * above still ran: the file was read and the placeholders resolved,
+	 * which is what the datalink widgets live on. */
+	if (px_osd_active() && !DrawOSD)
+		return false;
 
 	int posX = 5, posY = 5;
 
@@ -2138,16 +2156,20 @@ static int g_px_layout_loaded;
  * double or triple buffering keeps working - each buffer remembers what it
  * already holds. Its content is two or three frames old, which still leaves far
  * less to redraw than a whole canvas. */
-#define PX_OSD_BUFS 4
-static struct {
-	uint8_t      *buf;
-	PxLayoutCache cache;
-	/* Where last frame's detection boxes landed ON THIS BUFFER: the next
-	 * frame drawn here must clear that area or the boxes trail. */
-	PxDirty       det;
-} g_px_bufs[PX_OSD_BUFS];
-static PxLayoutCache *g_px_cache;   /* cache belonging to this frame's buffer */
-static PxDirty *g_px_det_prev;      /* its previous detection footprint */
+/* Incremental drawing happens on a PRIVATE shadow canvas, not on the mapped
+ * RGN buffer. The driver flips hardware buffers behind ONE mapped address, so
+ * a delta drawn "in place" lands on pixels from two frames ago and widgets
+ * the cache called unchanged were simply absent from every other buffer. The
+ * shadow is ours alone: deltas are computed against pixels that are really
+ * there, and the WHOLE shadow is copied out each frame, so whichever buffer
+ * the driver shows holds the complete picture. The copy is ~1 MB of straight
+ * memcpy; re-rasterising every widget cost ~100 ms a frame and starved the
+ * event loop that also services the flight controller's serial port. */
+static uint8_t *g_px_shadow;
+static PxLayoutCache g_px_shadow_cache;
+static PxDirty g_px_shadow_det;     /* previous detection footprint on it */
+static PxLayoutCache *g_px_cache;   /* set when the shadow path is active */
+static PxDirty *g_px_det_prev;
 static int g_px_incremental;        /* this frame: the caller skipped the clear */
 
 int px_osd_load_layout(const char *path)
@@ -2188,32 +2210,25 @@ static int px_osd_need_clear(uint8_t *buf)
 	if (!g_px_layout_loaded || DrawOSD || !buf)
 		return 1;
 
-	for (int i = 0; i < PX_OSD_BUFS; i++)
-		if (g_px_bufs[i].buf == buf) {
-			g_px_cache = &g_px_bufs[i].cache;
-			g_px_det_prev = &g_px_bufs[i].det;
-			g_px_incremental = 1;
-			return 0; /* we know what this buffer already holds */
-		}
+	/* MSPOSD_PX_FULL=1: debug escape hatch - full clear and redraw straight
+	 * into the RGN canvas, the way the character OSD always worked. Costs
+	 * ~100 ms a frame at 1080p, which is why it is not the default. */
+	static int full = -1;
+	if (full < 0) {
+		const char *e = getenv("MSPOSD_PX_FULL");
+		full = (e && *e == '1');
+		printf(full ? "[px_osd] full redraw per frame (debug)\n"
+			     : "[px_osd] incremental on shadow canvas\n");
+	}
+	if (full)
+		return 1;
 
-	/* First sight of this buffer: clear it and start its cache. If more buffers
-	 * are in rotation than we track, slot 0 gets reused and that one buffer
-	 * simply receives full frames - correct, just not optimised. */
-	for (int i = 0; i < PX_OSD_BUFS; i++)
-		if (!g_px_bufs[i].buf) {
-			g_px_bufs[i].buf = buf;
-			g_px_cache = &g_px_bufs[i].cache;
-			g_px_det_prev = &g_px_bufs[i].det;
-			px_layout_cache_reset(g_px_cache);
-			px_dirty_reset(g_px_det_prev);
-			return 1;
-		}
-	g_px_bufs[0].buf = buf;
-	g_px_cache = &g_px_bufs[0].cache;
-	g_px_det_prev = &g_px_bufs[0].det;
-	px_layout_cache_reset(g_px_cache);
-	px_dirty_reset(g_px_det_prev);
-	return 1;
+	/* Shadow path: the mapped buffer needs no clearing - the whole shadow
+	 * overwrites it every frame. */
+	g_px_cache = &g_px_shadow_cache;
+	g_px_det_prev = &g_px_shadow_det;
+	g_px_incremental = 1;
+	return 0;
 }
 
 static void px_osd_fill(PxTelemetry *t)
@@ -2267,7 +2282,20 @@ static void px_osd_fill(PxTelemetry *t)
 	t->cells = last_batt_cells;
 	if (t->cells <= 0 && t->volt_v > 1.0f)
 		t->cells = (int)((t->volt_v + 4.39f) / 4.4f);
-	snprintf(t->mode, sizeof(t->mode), "%s", current_fc_identifier);
+	/* Flight mode from the STATUS flags, not the FC variant string - "BTFL"
+	 * is what the firmware is called, not how it is flying. Bit positions
+	 * follow the stock Betaflight box order (ARM, ANGLE, HORIZON); a config
+	 * with reordered boxes would mislabel, which is still better than a
+	 * label that means nothing on every config. Dashes until the first
+	 * STATUS response, so "no data" never reads as a mode. */
+	if (!last_fm_seen)
+		snprintf(t->mode, sizeof(t->mode), "----");
+	else if (last_fm_flags & (1u << 1))
+		snprintf(t->mode, sizeof(t->mode), "ANGL");
+	else if (last_fm_flags & (1u << 2))
+		snprintf(t->mode, sizeof(t->mode), "HRZN");
+	else
+		snprintf(t->mode, sizeof(t->mode), "ACRO");
 	if (strlen(air_unit_info_msg) > 1)
 		snprintf(t->msg, sizeof(t->msg), "%s", air_unit_info_msg);
 	/* The air unit's link daemon has no API - it publishes one formatted line,
@@ -2287,10 +2315,29 @@ static void px_osd_draw(const PxDirty *det_now)
 		return;
 	if (PIXEL_FORMAT_DEFAULT != PIXEL_FORMAT_I4)
 		return; /* the pixel layer writes I4 nibbles directly */
+	const int stride = getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel);
+	const size_t canvas_bytes = (size_t)stride * bmpBuff.u32Height;
 	PxCanvas c;
-	px_canvas_init(&c, bmpBuff.pData, (int)bmpBuff.u32Width,
-		(int)bmpBuff.u32Height,
-		getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
+	if (g_px_cache) {
+		/* Incremental, on the private shadow - see its declaration for why
+		 * drawing deltas onto the mapped buffer cannot work. */
+		if (!g_px_shadow) {
+			g_px_shadow = malloc(canvas_bytes);
+			if (g_px_shadow) {
+				memset(g_px_shadow, 0xFF, canvas_bytes); /* transparent */
+				px_layout_cache_reset(g_px_cache);
+				px_dirty_reset(g_px_det_prev);
+			}
+		}
+		if (!g_px_shadow) {
+			/* No memory for a shadow: fall back to a direct full draw. */
+			g_px_cache = NULL;
+			g_px_det_prev = NULL;
+			memset(bmpBuff.pData, 0xFF, canvas_bytes);
+		}
+	}
+	px_canvas_init(&c, g_px_cache ? g_px_shadow : bmpBuff.pData,
+		(int)bmpBuff.u32Width, (int)bmpBuff.u32Height, stride);
 	PxTelemetry t;
 	px_osd_fill(&t);
 	/* An RC switch selects which layer set is shown. A change invalidates the
@@ -2333,6 +2380,13 @@ static void px_osd_draw(const PxDirty *det_now)
 			else
 				px_dirty_reset(g_px_det_prev);
 		}
+		/* Boxes go onto the shadow too (transparent pixels only, so they
+		 * stay behind the OSD), then the finished frame ships out in one
+		 * copy. Whichever hardware buffer the driver flips to, it gets the
+		 * complete picture. */
+		draw_detections_i4(g_px_shadow, bmpBuff.u32Width, bmpBuff.u32Height,
+			(uint32_t)stride);
+		memcpy(bmpBuff.pData, g_px_shadow, canvas_bytes);
 	} else {
 		px_layout_draw(&g_px_layout, &c, &t);
 	}
@@ -2506,7 +2560,10 @@ static void draw_screenBMP2(bool OnlyAHI) {
 		}
 	}
 	px_osd_draw(&det_now);
-	if (PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 && bmpBuff.pData != NULL)
+	/* The shadow path (g_px_cache set) draws the boxes itself; the character
+	 * path and the debug full-redraw still need them painted here. */
+	if (PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 && bmpBuff.pData != NULL &&
+		g_px_cache == NULL)
 		draw_detections_i4(bmpBuff.pData, bmpBuff.u32Width, bmpBuff.u32Height,
 			getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
 #else
