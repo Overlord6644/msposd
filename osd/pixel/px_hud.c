@@ -59,7 +59,11 @@ void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
 	const float px_per_unit = (float)h / span;
 	const int cy = y + h / 2;
 	const int tick_long = 14, tick_short = 8;
-	const int dir = (side == 2) ? -1 : 1;   /* which way the ticks point */
+	/* `side` says where the READOUT sits, which is how a layout author thinks
+	 * about it: a speed tape on the left of frame has its numbers on the left and
+	 * its ticks facing in. So align=left puts the box left and the ticks right,
+	 * align=right the other way round. */
+	const int dir = (side == 2) ? 1 : -1;
 
 	PxCanvas tape = *c;
 	px_clip(&tape, x - 90, y, x + 90, y + h);
@@ -85,18 +89,41 @@ void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
 	}
 	px_vline(&tape, x, y, y + h, color);
 
-	/* Current value in a box with a nose pointing at the scale. */
+	/* Current value in a box with a nose pointing at the scale.
+	 *
+	 * The backdrop is OPAQUE, not the semi-transparent shade: the scale label
+	 * nearest the centre lands right behind this box, and through a translucent
+	 * fill the two numbers overlap into an unreadable smudge. Opaque means the
+	 * graduations genuinely pass behind the readout, which is how a real tape
+	 * behaves. Drawn after the ticks for the same reason. */
 	char cur[16];
 	snprintf(cur, sizeof(cur), "%.0f", value);
+	const int pad = 8;
 	int cw = px_text_width(cur, text_size + 4);
-	int bh = text_size + 12;
-	int bx0 = (dir > 0) ? x + tick_long + 4 : x - tick_long - 4 - cw - 14;
-	int bx1 = bx0 + cw + 14;
-	px_fill_rect(c, bx0, cy - bh / 2, bx1, cy + bh / 2, PX_SHADE);
-	px_rect(c, bx0, cy - bh / 2, bx1, cy + bh / 2, 1, accent);
-	px_text(c, bx0 + 7, cy + (text_size + 4) / 3, cur, text_size + 4, accent, edge);
-	int nose = (dir > 0) ? bx0 : bx1;
-	px_fill_triangle(c, nose - dir * 8, cy, nose, cy - 6, nose, cy + 6, accent);
+	int bh = text_size + 14;
+	const int nose_len = 10;
+	int bx0 = (dir > 0) ? x + tick_long + 4 + nose_len
+			   : x - tick_long - 4 - nose_len - cw - pad * 2;
+	int bx1 = bx0 + cw + pad * 2;
+	int ty0 = cy - bh / 2, ty1 = cy + bh / 2;
+	/* Pointed flag rather than a rectangle with a triangle stuck on it: the
+	 * outline follows the point, which is what makes it read as an indicator
+	 * aimed at the scale instead of a label parked next to it. */
+	int inner = (dir > 0) ? bx0 : bx1;          /* edge facing the scale */
+	int apex  = inner - dir * nose_len;
+	px_fill_rect(c, bx0, ty0, bx1, ty1, PX_BLACK);
+	px_fill_triangle(c, apex, cy, inner, ty0, inner, ty1, PX_BLACK);
+	/* Outline, five edges, skipping the one the nose replaces. */
+	px_hline(c, bx0, bx1, ty0, accent);
+	px_hline(c, bx0, bx1, ty1, accent);
+	px_vline(c, (dir > 0) ? bx1 : bx0, ty0, ty1, accent);
+	px_line(c, inner, ty0, apex, cy, accent);
+	px_line(c, inner, ty1, apex, cy, accent);
+	/* Baseline centred on the box, so digits sit in the middle at any size. No
+	 * edge colour: the opaque backdrop already provides the contrast, and an
+	 * outline inside a small box only thickens the glyphs. */
+	px_text(c, bx0 + pad, cy + (text_size + 4) / 3, cur, text_size + 4,
+		accent, PX_TRANSPARENT);
 }
 
 void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
@@ -138,45 +165,66 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 		int y1 = by - (int)lrintf(sa * (float)arm);
 		uint8_t col = (d == 0) ? accent : color;
 
-		if (d == 0) {
-			/* The horizon is one continuous bar - it is the reference. */
-			px_line_thick(c, x0, y0, x1, y1, 2, col);
-		} else {
-			/* Graduations are broken either side of centre, and the ends turn
-			 * toward the horizon so up and down are unambiguous. */
-			int gx = (int)lrintf(ca * (float)gap);
-			int gy = (int)lrintf(sa * (float)gap);
-			px_line(c, x0, y0, bx - gx, by + gy, col);
-			px_line(c, bx + gx, by - gy, x1, y1, col);
-			int tick = (d > 0) ? 7 : -7;
-			px_line(c, x0, y0, x0 + (int)lrintf(sa * tick),
-				y0 + (int)lrintf(ca * tick), col);
-			px_line(c, x1, y1, x1 + (int)lrintf(sa * tick),
-				y1 + (int)lrintf(ca * tick), col);
+		/* Both the horizon and the graduations are two segments with a gap in
+		 * the middle: the aircraft reference belongs IN that gap, not under a
+		 * line drawn across it. */
+		int gx = (int)lrintf(ca * (float)gap);
+		int gy = (int)lrintf(sa * (float)gap);
+		int ix0 = bx - gx, iy0 = by + gy;   /* inner end, left segment  */
+		int ix1 = bx + gx, iy1 = by - gy;   /* inner end, right segment */
 
-			char buf[8];
-			snprintf(buf, sizeof(buf), "%d", d);
-			int tw = px_text_width(buf, text_size);
-			px_text(c, x0 - tw - 8, y0 + text_size / 3, buf, text_size, col, edge);
-			px_text(c, x1 + 8, y1 + text_size / 3, buf, text_size, col, edge);
+		if (d == 0) {
+			px_line_thick(c, x0, y0, ix0, iy0, 2, col);
+			px_line_thick(c, ix1, iy1, x1, y1, 2, col);
+			continue;
 		}
+
+		px_line(c, x0, y0, ix0, iy0, col);
+		px_line(c, ix1, iy1, x1, y1, col);
+
+		/* Perpendicular tick at the INNER end, pointing back toward the
+		 * horizon: on a graduation above you it hangs down, below you it stands
+		 * up, so which side of level you are on is readable without finding the
+		 * sign of the label. */
+		int tick = (d > 0) ? 9 : -9;
+		int tx = (int)lrintf(sa * tick), ty = (int)lrintf(ca * tick);
+		px_line(c, ix0, iy0, ix0 + tx, iy0 + ty, col);
+		px_line(c, ix1, iy1, ix1 + tx, iy1 + ty, col);
+
+		/* Label at the outer end of each segment, where nothing else is. */
+		char buf[8];
+		snprintf(buf, sizeof(buf), "%d", d < 0 ? -d : d);
+		int tw = px_text_width(buf, text_size);
+		px_text(c, x0 - tw - 8, y0 + text_size / 3, buf, text_size, col, edge);
+		px_text(c, x1 + 8, y1 + text_size / 3, buf, text_size, col, edge);
 	}
 }
 
 void px_hud_crosshair(const PxCanvas *c, int cx, int cy, int size,
 	uint8_t color, uint8_t edge)
 {
-	if (size < 6)
-		size = 6;
-	int arm = size / 2;
-	/* Corner brackets rather than a full cross: they mark the centre without
-	 * covering what is at it. */
-	for (int sx = -1; sx <= 1; sx += 2)
-		for (int sy = -1; sy <= 1; sy += 2) {
-			int x = cx + sx * arm, y = cy + sy * arm;
-			px_hline(c, x, x - sx * (arm / 2), y, color);
-			px_vline(c, x, y, y - sy * (arm / 2), color);
-		}
+	if (size < 8)
+		size = 8;
+	const int r = size / 3;          /* ring radius   */
+	const int arm = size / 2;        /* spike reach   */
+
+	/* A ringed pip with radial spikes, sitting in the gap the horizon leaves.
+	 * The ring keeps the exact centre visible against both sky and ground, and
+	 * the spikes give it presence without a solid mass that would hide whatever
+	 * the aircraft is pointed at. */
+	if (edge != PX_TRANSPARENT) {
+		px_circle(c, cx, cy, r + 1, edge);   /* dark halo, for light ground */
+		px_circle(c, cx, cy, r - 1, edge);
+	}
+	px_circle(c, cx, cy, r, color);
+
+	for (int i = 0; i < 8; i++) {
+		float a = (float)i * (float)M_PI / 4.0f;
+		int sx = (int)lrintf(cosf(a) * (float)(r + 2));
+		int sy = (int)lrintf(sinf(a) * (float)(r + 2));
+		int ex = (int)lrintf(cosf(a) * (float)arm);
+		int ey = (int)lrintf(sinf(a) * (float)arm);
+		px_line(c, cx + sx, cy + sy, cx + ex, cy + ey, color);
+	}
 	px_set(c, cx, cy, color);
-	(void)edge;
 }

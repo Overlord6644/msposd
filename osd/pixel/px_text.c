@@ -12,6 +12,22 @@
 static SFT_Font *g_font;
 static char g_font_path[256];
 
+/* A `size` in a layout has to mean a height on screen, not an em size.
+ *
+ * Faces disagree wildly about how much of the em the design fills: JetBrains
+ * Mono puts a capital at 0.73 em, UAV OSD Mono - drawn from a Reaper display,
+ * where the glyphs ARE the cell - fills it completely. Asking both for "size 30"
+ * gives caps of 22 and 30 px, and text 44% wider in the second, so swapping the
+ * font would silently invalidate every coordinate in the layout.
+ *
+ * So the requested size is treated as a cap height and converted to whatever em
+ * that face needs. PX_CAP_RATIO is the conventional ratio a typical text face
+ * has, which keeps existing layouts reading as they did while making the number
+ * portable across faces. */
+#define PX_CAP_RATIO 0.70
+#define PX_CAP_PROBE 64 /* em size used for the one-off measurement */
+static double g_cap_k = 1.0;
+
 /* Coverage thresholds that turn schrift's 8-bit alpha into palette indices.
  * Only the well-covered interior gets the body colour; partially covered edge
  * pixels get the edge colour. That yields a dark outline as a side effect of
@@ -40,6 +56,26 @@ int px_font_load(const char *path)
 		sft_freefont(g_font);
 	g_font = f;
 	snprintf(g_font_path, sizeof(g_font_path), "%s", path);
+
+	/* Measure how much of the em a capital actually fills, once per load.
+	 * 'H' is flat on both ends, so its ink height IS the cap height - no
+	 * overshoot to round off, unlike 'O'. */
+	g_cap_k = 1.0;
+	SFT sft;
+	sft.font = g_font;
+	sft.xScale = (double)PX_CAP_PROBE;
+	sft.yScale = (double)PX_CAP_PROBE;
+	sft.xOffset = 0.0;
+	sft.yOffset = 0.0;
+	sft.flags = SFT_DOWNWARD_Y;
+	SFT_Glyph gid;
+	SFT_GMetrics gm;
+	if (sft_lookup(&sft, 'H', &gid) == 0 && sft_gmetrics(&sft, gid, &gm) == 0 &&
+		gm.minHeight > 0) {
+		double cap = (double)gm.minHeight / (double)PX_CAP_PROBE;
+		if (cap > 0.3 && cap < 1.2)
+			g_cap_k = PX_CAP_RATIO / cap;
+	}
 	return 0;
 }
 
@@ -59,8 +95,9 @@ int px_font_ready(void)
 static void sft_for_size(SFT *sft, int size_px)
 {
 	sft->font = g_font;
-	sft->xScale = (double)size_px;
-	sft->yScale = (double)size_px;
+	/* Normalised so `size` buys the same cap height in every face. */
+	sft->xScale = (double)size_px * g_cap_k;
+	sft->yScale = (double)size_px * g_cap_k;
 	sft->xOffset = 0.0;
 	sft->yOffset = 0.0;
 	/* Y grows downward here, matching the canvas. */

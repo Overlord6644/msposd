@@ -18,4 +18,8 @@ msposd_rockchip
 version.h
 serial_monitor.c
 *.ini
+# The pixel-OSD layouts are sources, not local config - keep them despite the
+# blanket *.ini above (upstream uses .ini for machine-local settings).
+!osd/pixel/*.ini
+msposd_fusion_star6e
 

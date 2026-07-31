@@ -300,7 +300,10 @@ static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
 {
 	char buf[128];
 	const char *str = px_telemetry_text(t, w->source);
-	if (str) {
+	if (!*w->source) {
+		/* No source: a static label (units, captions), format is the text. */
+		snprintf(buf, sizeof(buf), "%s", *w->format ? w->format : w->name);
+	} else if (str) {
 		snprintf(buf, sizeof(buf), *w->format ? w->format : "%s", str);
 	} else {
 		float v = 0.0f;
@@ -624,7 +627,9 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		 * format identically genuinely draw the same pixels. */
 		char buf[128];
 		const char *str = px_telemetry_text(t, w->source);
-		if (str)
+		if (!*w->source)
+			snprintf(buf, sizeof(buf), "%s", *w->format ? w->format : w->name);
+		else if (str)
 			snprintf(buf, sizeof(buf), *w->format ? w->format : "%s", str);
 		else {
 			float v = 0.0f;
