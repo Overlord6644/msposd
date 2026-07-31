@@ -56,8 +56,40 @@ int px_icon(const PxCanvas *c, int x, int y, int h, PxIconKind kind,
 	uint8_t color, uint8_t edge)
 {
 	(void)edge; /* the bitmap brings its own colours */
+	if (!c || h < 6)
+		return 0;
+	if (kind == PX_ICON_PROP) {
+		/* No propeller in the emoji set, so this one is vector: a two-blade
+		 * prop caught mid-turn - blades on the diagonal, two motion arcs in
+		 * the empty quadrants - with its own word under it, RSSI-style. It
+		 * takes the widget's colour, so an RPM readout past its threshold
+		 * turns whole. */
+		int ph = (h * 7) / 10;  /* prop above, the word in the rest */
+		int ts = h - ph;
+		if (ts < 8)
+			ts = 8;
+		int cx = x + h / 2, cy = y + ph / 2;
+		int r = ph / 7 < 2 ? 2 : ph / 7;    /* hub radius */
+		int L = ph / 2 - 1;                 /* blade reach from centre */
+		int d = (L * 707) / 1000;           /* L / sqrt(2) */
+		int b = (r * 707) / 1000 + 1;       /* half base width, rotated */
+		/* Blades: lens-ish triangles from a base across the hub to tips on
+		 * the up-right / down-left diagonal. */
+		px_fill_triangle(c, cx + b, cy + b, cx - b, cy - b,
+			cx + d, cy - d, color);
+		px_fill_triangle(c, cx + b, cy + b, cx - b, cy - b,
+			cx - d, cy + d, color);
+		px_disc(c, cx, cy, r, color);
+		/* The rotation: short arcs trailing through the free quadrants. */
+		px_arc(c, cx, cy, L, 110.0f, 160.0f, color);
+		px_arc(c, cx, cy, L, 290.0f, 340.0f, color);
+		int tw = px_text_width("RPM", ts);
+		px_text(c, x + (h - tw) / 2, y + h, "RPM", ts, color,
+			PX_TRANSPARENT);
+		return h;
+	}
 	const uint8_t *bm = icon_bits(kind);
-	if (!c || !bm || h < 6)
+	if (!bm)
 		return 0;
 	if (kind == PX_ICON_RSSI) {
 		/* Bars over the word, both inside the cell. The word takes the
@@ -88,5 +120,6 @@ PxIconKind px_icon_parse(const char *name)
 	if (!strcmp(name, "lon"))  return PX_ICON_LON;
 	if (!strcmp(name, "batt")) return PX_ICON_BATT;
 	if (!strcmp(name, "trip")) return PX_ICON_TRIP;
+	if (!strcmp(name, "prop")) return PX_ICON_PROP;
 	return PX_ICON_NONE;
 }

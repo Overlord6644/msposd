@@ -40,6 +40,44 @@ static double g_cap_k = 1.0;
  * 1080p; larger requests are clamped rather than truncated silently. */
 #define PX_GLYPH_MAX 128
 
+/* ---- glyph cache ----
+ *
+ * Rasterising TrueType outlines is where the OSD's CPU time actually goes:
+ * profiled on the flight layout, schrift's render_outline alone was ~60% of
+ * the whole frame, because every "128", every "%", every coordinate digit was
+ * re-rendered from its outline every frame it changed. An OSD draws the same
+ * few dozen (codepoint, size) pairs forever, so the coverage bitmaps are
+ * cached on first use and every draw after that is a blit.
+ *
+ * Direct-mapped by hash, one entry per slot: a collision re-renders and
+ * replaces, which is correct just slower, and with ~100 live glyphs in a
+ * 1024-slot table collisions are rare. The cache is flushed with the font. */
+#define PX_GC_SLOTS 1024
+
+typedef struct {
+	SFT_Glyph gid;
+	int       size;         /* requested size_px; 0 = slot empty */
+	int       w, h;         /* coverage bitmap, w*h bytes; w==0 for blank */
+	int       yoff;         /* gm.yOffset */
+	double    lsb;          /* leftSideBearing */
+	double    adv;          /* advanceWidth */
+	/* Ink bounds within the bitmap (cov >= PX_COV_EDGE), so the dirty
+	 * rectangle covers only real pixels; wi < 0 when the glyph is blank. */
+	int       ix0, iy0, ix1, iy1;
+	uint8_t  *cov;
+} PxGlyphSlot;
+
+static PxGlyphSlot g_gc[PX_GC_SLOTS];
+
+static void gc_flush(void)
+{
+	for (int i = 0; i < PX_GC_SLOTS; i++) {
+		free(g_gc[i].cov);
+		g_gc[i].cov = NULL;
+		g_gc[i].size = 0;
+	}
+}
+
 int px_font_load(const char *path)
 {
 	if (!path || !*path)
@@ -54,6 +92,7 @@ int px_font_load(const char *path)
 	if (g_font)
 		sft_freefont(g_font);
 	g_font = f;
+	gc_flush();
 	snprintf(g_font_path, sizeof(g_font_path), "%s", path);
 
 	/* Measure how much of the em a capital actually fills, once per load.
@@ -83,7 +122,117 @@ void px_font_free(void)
 	if (g_font)
 		sft_freefont(g_font);
 	g_font = NULL;
+	gc_flush();
 	g_font_path[0] = '\0';
+}
+
+/* The cached raster of one (glyph, size) pair, rendering it on first use.
+ * NULL only when schrift itself fails on the glyph. */
+static PxGlyphSlot *gc_get(const SFT *sft, SFT_Glyph gid, int size_px)
+{
+	unsigned idx = ((unsigned)gid * 2654435761u ^ (unsigned)size_px * 40503u)
+		% PX_GC_SLOTS;
+	PxGlyphSlot *s = &g_gc[idx];
+	if (s->size == size_px && s->gid == gid && s->size != 0)
+		return s;
+
+	SFT_GMetrics gm;
+	if (sft_gmetrics(sft, gid, &gm) < 0)
+		return NULL;
+	free(s->cov);
+	memset(s, 0, sizeof(*s));
+	s->gid = gid;
+	s->size = size_px;
+	s->yoff = gm.yOffset;
+	s->lsb = gm.leftSideBearing;
+	s->adv = gm.advanceWidth;
+	s->ix0 = s->iy0 = 0;
+	s->ix1 = s->iy1 = -1;
+
+	int gw = gm.minWidth, gh = gm.minHeight;
+	if (gw <= 0 || gh <= 0 || gw > PX_GLYPH_MAX || gh > PX_GLYPH_MAX)
+		return s; /* blank (space) or oversized: advance only, no pixels */
+
+	uint8_t *cov = malloc((size_t)gw * (size_t)gh);
+	if (!cov)
+		return s;
+	memset(cov, 0, (size_t)gw * (size_t)gh);
+	SFT_Image img = { .pixels = cov, .width = gw, .height = gh };
+	if (sft_render(sft, gid, img) != 0) {
+		free(cov);
+		return s;
+	}
+	s->cov = cov;
+	s->w = gw;
+	s->h = gh;
+	/* Ink bounds: what the dirty tracker should see, rather than the whole
+	 * (padded) bitmap. */
+	int x0 = gw, y0 = gh, x1 = -1, y1 = -1;
+	for (int y = 0; y < gh; y++) {
+		const uint8_t *row = cov + (size_t)y * gw;
+		for (int x = 0; x < gw; x++)
+			if (row[x] >= PX_COV_EDGE) {
+				if (x < x0) x0 = x;
+				if (x > x1) x1 = x;
+				if (y < y0) y0 = y;
+				y1 = y;
+			}
+	}
+	s->ix0 = x0; s->iy0 = y0; s->ix1 = x1; s->iy1 = y1;
+	return s;
+}
+
+/* Paint a cached coverage bitmap. The nibble writes go straight to the row -
+ * clip is applied to the loop bounds once and the dirty box grows once per
+ * glyph, instead of paying both per pixel in px_set. `behind` canvases (the
+ * detection-box pass) never draw text, so that flag keeps the slow path. */
+static void gc_blit(const PxCanvas *c, int ox, int oy, const PxGlyphSlot *s,
+	uint8_t color, uint8_t edge)
+{
+	if (s->ix1 < s->ix0)
+		return; /* blank */
+	int x0 = ox + s->ix0, y0 = oy + s->iy0;
+	int x1 = ox + s->ix1, y1 = oy + s->iy1;
+	if (x0 < c->clip_x0) x0 = c->clip_x0;
+	if (y0 < c->clip_y0) y0 = c->clip_y0;
+	if (x1 > c->clip_x1) x1 = c->clip_x1;
+	if (y1 > c->clip_y1) y1 = c->clip_y1;
+	if (x1 < x0 || y1 < y0)
+		return;
+	if (c->dirty) {
+		PxDirty *d = c->dirty;
+		if (d->x1 < d->x0) {
+			d->x0 = x0; d->y0 = y0; d->x1 = x1; d->y1 = y1;
+		} else {
+			if (x0 < d->x0) d->x0 = x0;
+			if (y0 < d->y0) d->y0 = y0;
+			if (x1 > d->x1) d->x1 = x1;
+			if (y1 > d->y1) d->y1 = y1;
+		}
+	}
+	for (int y = y0; y <= y1; y++) {
+		const uint8_t *crow = s->cov + (size_t)(y - oy) * s->w + (x0 - ox);
+		uint8_t *row = c->data + (size_t)y * c->stride;
+		for (int x = x0; x <= x1; x++, crow++) {
+			uint8_t cv = *crow;
+			uint8_t col;
+			if (cv >= PX_COV_BODY)
+				col = color;
+			else if (cv >= PX_COV_EDGE && edge != PX_TRANSPARENT)
+				col = edge;
+			else
+				continue;
+			if (c->behind) {
+				px_set(c, x, y, col);
+				continue;
+			}
+			uint8_t *p = row + (x >> 1);
+			if (x & 1)
+				*p = (uint8_t)((*p & 0x0F) | (col << 4));
+			else
+				*p = (uint8_t)((*p & 0xF0) | (col & 0x0F));
+		}
+	}
 }
 
 int px_font_ready(void)
@@ -147,12 +296,11 @@ int px_text_width(const char *text, int size_px)
 	while (*s) {
 		uint32_t cp = next_cp(&s);
 		SFT_Glyph gid;
-		SFT_GMetrics gm;
 		if (sft_lookup(&sft, cp, &gid) < 0)
 			continue;
-		if (sft_gmetrics(&sft, gid, &gm) < 0)
-			continue;
-		pen += gm.advanceWidth;
+		const PxGlyphSlot *gs = gc_get(&sft, gid, size_px);
+		if (gs)
+			pen += gs->adv;
 	}
 	return (int)(pen + 0.5);
 }
@@ -166,50 +314,23 @@ int px_text(const PxCanvas *c, int x, int y, const char *text, int size_px,
 	SFT sft;
 	sft_for_size(&sft, size_px);
 
-	uint8_t *bmp = malloc(PX_GLYPH_MAX * PX_GLYPH_MAX);
-	if (!bmp)
-		return 0;
-
 	double pen = (double)x;
 	const unsigned char *s = (const unsigned char *)text;
 	while (*s) {
 		uint32_t cp = next_cp(&s);
 		SFT_Glyph gid;
-		SFT_GMetrics gm;
 		if (sft_lookup(&sft, cp, &gid) < 0)
 			continue;
-		if (sft_gmetrics(&sft, gid, &gm) < 0)
+		const PxGlyphSlot *gs = gc_get(&sft, gid, size_px);
+		if (!gs)
 			continue;
-
-		int gw = gm.minWidth, gh = gm.minHeight;
-		if (gw > 0 && gh > 0 && gw <= PX_GLYPH_MAX && gh <= PX_GLYPH_MAX) {
-			SFT_Image img;
-			img.pixels = bmp;
-			img.width = gw;
-			img.height = gh;
-			memset(bmp, 0, (size_t)gw * (size_t)gh);
-			if (sft_render(&sft, gid, img) == 0) {
-				int ox = (int)(pen + gm.leftSideBearing + 0.5);
-				int oy = y + gm.yOffset;
-				/* Edge pass first, body second, so the body is
-				 * never eaten by the outline of its own glyph. */
-				if (edge != PX_TRANSPARENT) {
-					for (int gy = 0; gy < gh; gy++)
-						for (int gx = 0; gx < gw; gx++) {
-							uint8_t cov = bmp[gy * gw + gx];
-							if (cov >= PX_COV_EDGE && cov < PX_COV_BODY)
-								px_set(c, ox + gx, oy + gy, edge);
-						}
-				}
-				for (int gy = 0; gy < gh; gy++)
-					for (int gx = 0; gx < gw; gx++)
-						if (bmp[gy * gw + gx] >= PX_COV_BODY)
-							px_set(c, ox + gx, oy + gy, color);
-			}
+		if (gs->cov) {
+			int ox = (int)(pen + gs->lsb + 0.5);
+			int oy = y + gs->yoff;
+			gc_blit(c, ox, oy, gs, color, edge);
 		}
-		pen += gm.advanceWidth;
+		pen += gs->adv;
 	}
 
-	free(bmp);
 	return (int)(pen + 0.5) - x;
 }

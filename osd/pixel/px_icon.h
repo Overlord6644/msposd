@@ -19,6 +19,7 @@ typedef enum {
 	PX_ICON_LON,    /* globe, meridians          */
 	PX_ICON_BATT,   /* battery, nub right        */
 	PX_ICON_TRIP,   /* road - distance travelled */
+	PX_ICON_PROP,   /* two-blade propeller, face-on (vector, not bitmap) */
 } PxIconKind;
 
 /* Draw icon `kind` with its top-left at (x, y), `h` pixels tall. Returns the

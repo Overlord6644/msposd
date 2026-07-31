@@ -166,6 +166,7 @@ static uint16_t last_mah_used = 0;
 static uint8_t  last_batt_cells = 0;
 static uint16_t last_batt_capacity = 0;
 static int      last_rssi_pct = -1;   /* -1 = never received */
+static uint32_t last_rpm_avg = 0;     /* MSP_MOTOR_TELEMETRY, needs bidir DShot */
 
 static msp_state_t *msp_state;
 
@@ -603,6 +604,28 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		break;
 	}
 
+
+	/* MSP_MOTOR_TELEMETRY: count u8, then per motor rpm u32, invalid% u16,
+	 * temperature u8, voltage u16, current u16, consumption u16 (13 bytes).
+	 * Only the rpm average is kept - the OSD shows one figure, not four.
+	 * All zeros without bidirectional DShot, which is the honest answer. */
+	case MSP_MOTOR_TELEMETRY: {
+		int n = msp_message->payload[0];
+		if (n > 8)
+			n = 8;
+		uint32_t sum = 0;
+		int cnt = 0;
+		for (int i = 0; i < n; i++) {
+			if (msp_message->size < 1 + (i + 1) * 13)
+				break;
+			uint32_t rpm;
+			memcpy(&rpm, &msp_message->payload[1 + i * 13], sizeof(rpm));
+			sum += rpm;
+			cnt++;
+		}
+		last_rpm_avg = cnt ? sum / (uint32_t)cnt : 0;
+		break;
+	}
 
 	case MSP_RC: {
 		// printf("Got MSP_RC\n");
@@ -1559,11 +1582,21 @@ void fill(char *str) {
 			unsigned int bitrate;
 			float fps;
 			char c[25];
+			/* The popen below forks a shell plus cat, grep and awk - ~100 ms
+			 * on this single-core A7. Uncached, and with the OSD's message
+			 * line containing &B, that was one fork storm PER FRAME: it
+			 * alone pinned the event loop and starved the FC's serial port
+			 * (the OSD-slower-than-1-Hz bug). The figure moves once a
+			 * second at most, so cache it like GetTXTemp() does. */
+			static char cached_b[25];
+			static uint64_t cached_b_ms;
+			if (get_time_ms() - cached_b_ms >= 1000 || !cached_b[0]) {
+				cached_b_ms = get_time_ms();
 #ifdef __SIGMASTAR__
 
 	#ifdef __INFINITY6C__
 			FILE *stat = popen("cat /proc/mi_modules/mi_venc/mi_venc0 | grep Fps_1s "
-							   "-A 1 | awk 'NR==2 {print $7, $8}'", "r");			
+							   "-A 1 | awk 'NR==2 {print $7, $8}'", "r");
 	#else
 			FILE *stat = popen("cat /proc/mi_modules/mi_venc/mi_venc0 | grep Fps10s "
 							   "-A 1 | awk 'NR==2 {print $9, $10}'", "r");
@@ -1572,7 +1605,7 @@ void fill(char *str) {
 			if (stat == NULL) {
 				sscanf("34.91 14836", "%f %u", &fps, &bitrate);
 			} else {
-				fscanf(stat, "%f %u", &fps, &bitrate);				
+				fscanf(stat, "%f %u", &fps, &bitrate);
 				pclose(stat);
 			}
 #else
@@ -1582,7 +1615,9 @@ void fill(char *str) {
 			float megabits = bitrate / 1000.0;
 
 			// Print the value with one digit after the decimal point
-			sprintf(c, "%.1fMb FPS:%d", megabits, (unsigned int)fps);
+			sprintf(cached_b, "%.1fMb FPS:%d", megabits, (unsigned int)fps);
+			}
+			snprintf(c, sizeof(c), "%s", cached_b);
 
 			strcat(out, c);
 			opos += strlen(c);
@@ -2172,6 +2207,76 @@ static PxLayoutCache *g_px_cache;   /* set when the shadow path is active */
 static PxDirty *g_px_det_prev;
 static int g_px_incremental;        /* this frame: the caller skipped the clear */
 
+/* MSPOSD_PX_STATS=1: one line a second of what the pixel path actually costs
+ * ON THE CAMERA - draw microseconds, copy microseconds, widgets redrawn,
+ * kilobytes shipped to the uncached region memory. Host benchmarks cannot see
+ * the uncached-memory stall, which is the number that matters here. */
+static uint64_t px_stats_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(1 /*CLOCK_MONOTONIC*/, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+/* Timings of the two RGN driver calls that bracket a frame - they can block
+ * on the compositor and starve the event loop just as thoroughly as slow
+ * drawing did, and nothing else measures them. */
+static uint64_t g_px_getcanvas_us;
+static uint64_t g_px_update_us;
+static uint64_t g_px_misc_us;
+
+static void px_stats_frame(uint64_t draw_us, uint64_t copy_us, int redrawn,
+	size_t copied_bytes)
+{
+	static int enabled = -1;
+	if (enabled < 0) {
+		const char *e = getenv("MSPOSD_PX_STATS");
+		enabled = (e && *e == '1');
+	}
+	if (!enabled)
+		return;
+	/* The first frames also log which canvas address the driver handed out:
+	 * whether it flips among several mapped buffers or shows one address is
+	 * what decides how copy-out seeding must work. */
+	static int probe = 40;
+	if (probe > 0) {
+		probe--;
+		printf("[px_stats] canvas virtAddr %p\n", (void *)bmpBuff.pData);
+	}
+	static uint64_t win_start_us, draw_acc, copy_acc, bytes_acc;
+	static uint64_t getc_acc, upd_acc, misc_acc;
+	static int frames, redrawn_acc;
+	uint64_t now = px_stats_now_us();
+	if (!win_start_us)
+		win_start_us = now;
+	draw_acc += draw_us;
+	copy_acc += copy_us;
+	bytes_acc += copied_bytes;
+	redrawn_acc += redrawn;
+	getc_acc += g_px_getcanvas_us;
+	upd_acc += g_px_update_us;
+	misc_acc += g_px_misc_us;
+	g_px_getcanvas_us = g_px_update_us = g_px_misc_us = 0;
+	frames++;
+	if (now - win_start_us >= 1000000ull) {
+		printf("[px_stats] %d fps, draw %.1f ms, copy %.1f ms, "
+			"getcanvas %.1f ms, update %.1f ms, misc %.1f ms, "
+			"%.1f widgets, %.0f KB out per frame\n",
+			frames,
+			(double)draw_acc / frames / 1000.0,
+			(double)copy_acc / frames / 1000.0,
+			(double)getc_acc / frames / 1000.0,
+			(double)upd_acc / frames / 1000.0,
+			(double)misc_acc / frames / 1000.0,
+			(double)redrawn_acc / frames,
+			(double)bytes_acc / frames / 1024.0);
+		win_start_us = now;
+		draw_acc = copy_acc = bytes_acc = 0;
+		getc_acc = upd_acc = misc_acc = 0;
+		frames = redrawn_acc = 0;
+	}
+}
+
 int px_osd_load_layout(const char *path)
 {
 	if (px_layout_load(&g_px_layout, path) != 0)
@@ -2254,15 +2359,16 @@ static void px_osd_fill(PxTelemetry *t)
 	t->lat_e7 = last_lat_e7;
 	t->lon_e7 = last_lon_e7;
 	/* Trip odometer, integrated here because MSP carries no travelled
-	 * distance: ground speed times wall time between fills. Below 0.5 m/s the
-	 * sample is discarded - GPS speed noise on a parked aircraft would
-	 * otherwise add metres per minute of sitting still. Since boot, on
-	 * purpose: a battery swap should not zero the day's distance. */
+	 * distance: ground speed times wall time between fills. Only while ARMED
+	 * - carrying the aircraft to the pad, or GPS speed noise on a parked one,
+	 * must not count as flying. Below 0.5 m/s the sample is discarded for the
+	 * same reason. Kept across disarms, on purpose: a battery swap should not
+	 * zero the day's distance. */
 	{
 		static uint64_t trip_last_ms;
 		static float trip_m;
 		uint64_t now = get_time_ms();
-		if (trip_last_ms) {
+		if (trip_last_ms && armed) {
 			float dt = (float)(now - trip_last_ms) / 1000.0f;
 			float ms = (float)last_speed / 100.0f; /* cm/s -> m/s */
 			if (ms > 0.5f && dt > 0.0f && dt < 5.0f)
@@ -2271,6 +2377,7 @@ static void px_osd_fill(PxTelemetry *t)
 		trip_last_ms = now;
 		t->trip_m = trip_m;
 	}
+	t->rpm_avg = (float)last_rpm_avg;
 	t->home_dist_m = (float)last_distanceToHome;
 	t->home_bearing_deg = (float)last_directionToHome;
 	t->rssi_pct = last_rssi_pct < 0 ? 0 : last_rssi_pct;
@@ -2355,25 +2462,21 @@ static void px_osd_draw(const PxDirty *det_now)
 		 * reset, so every widget is redrawn and recorded, and the next frame on
 		 * that buffer only touches what moved.
 		 *
-		 * The extra rect is the detection boxes' footprint - last frame's on
-		 * THIS buffer (must be erased) unioned with this frame's (widgets
-		 * under it must be repaired before the boxes repaint). Without it the
-		 * cache has no idea the boxes exist, and they trail. */
-		PxDirty extra;
-		px_dirty_reset(&extra);
-		if (g_px_det_prev && g_px_det_prev->x1 >= g_px_det_prev->x0)
-			extra = *g_px_det_prev;
-		if (det_now && det_now->x1 >= det_now->x0) {
-			if (extra.x1 < extra.x0)
-				extra = *det_now;
-			else {
-				if (det_now->x0 < extra.x0) extra.x0 = det_now->x0;
-				if (det_now->y0 < extra.y0) extra.y0 = det_now->y0;
-				if (det_now->x1 > extra.x1) extra.x1 = det_now->x1;
-				if (det_now->y1 > extra.y1) extra.y1 = det_now->y1;
-			}
-		}
-		px_layout_draw_cached_ex(&g_px_layout, &c, &t, g_px_cache, &extra);
+		 * The extra rects are the detection boxes' footprints - last frame's
+		 * (must be erased) and this frame's (widgets under it must be
+		 * repaired before the boxes repaint). Without them the cache has no
+		 * idea the boxes exist, and they trail. */
+		PxRegion extra;
+		px_region_reset(&extra);
+		if (g_px_det_prev)
+			px_region_add(&extra, g_px_det_prev);
+		if (det_now)
+			px_region_add(&extra, det_now);
+		PxRegion touched;
+		uint64_t t_draw0 = px_stats_now_us();
+		int nredrawn = px_layout_draw_cached_ex(&g_px_layout, &c, &t,
+			g_px_cache, &extra, &touched);
+		uint64_t t_draw1 = px_stats_now_us();
 		if (g_px_det_prev) {
 			if (det_now)
 				*g_px_det_prev = *det_now;
@@ -2381,12 +2484,32 @@ static void px_osd_draw(const PxDirty *det_now)
 				px_dirty_reset(g_px_det_prev);
 		}
 		/* Boxes go onto the shadow too (transparent pixels only, so they
-		 * stay behind the OSD), then the finished frame ships out in one
-		 * copy. Whichever hardware buffer the driver flips to, it gets the
-		 * complete picture. */
+		 * stay behind the OSD). Their area is inside `extra`, so `touched`
+		 * already covers them. */
 		draw_detections_i4(g_px_shadow, bmpBuff.u32Width, bmpBuff.u32Height,
 			(uint32_t)stride);
-		memcpy(bmpBuff.pData, g_px_shadow, canvas_bytes);
+
+		/* Ship the WHOLE shadow, every frame. Windowed copies (a ring of
+		 * recently-touched rectangles, then a rotating reseed band) were
+		 * both tried and both left widgets missing from the screen: the
+		 * driver flips an unknown number of physical buffers behind ONE
+		 * mapped address (probed: GetCanvas returns the same virtAddr every
+		 * frame), so no partial-copy schedule provably reaches every
+		 * buffer, and the display showed whichever subset each buffer
+		 * happened to receive. A full copy makes every buffer complete at
+		 * the moment it is written, whatever the flip pattern is.
+		 *
+		 * Affordable because the old "~90 ms for a full copy" was never the
+		 * memcpy: measured on target, this copy runs at ~0.5 GB/s (~2 ms
+		 * for the 1 MB canvas). The 90 ms frames were the full REDRAW -
+		 * every glyph re-rasterised from its TrueType outline - which the
+		 * shadow cache and the glyph cache now avoid. `touched` still
+		 * matters: it is what keeps the DRAW side incremental. */
+		(void)touched;
+		size_t copied = (size_t)stride * bmpBuff.u32Height;
+		memcpy(bmpBuff.pData, g_px_shadow, copied);
+		px_stats_frame(t_draw1 - t_draw0, px_stats_now_us() - t_draw1,
+			nredrawn, copied);
 	} else {
 		px_layout_draw(&g_px_layout, &c, &t);
 	}
@@ -2430,7 +2553,9 @@ static void draw_screenBMP2(bool OnlyAHI) {
 		// bmpBuff.pData = malloc( bmpBuff.u32Height * bmpBuff.u32Width / 8);
 		if (useDirectBMPBuffer) {
 			//We need to get pointer to the canvas mem every iteration
+			uint64_t t_gc = px_stats_now_us();
 			bmpBuff.pData = get_directBMP(osds[FULL_OVERLAY_ID].hand);
+			g_px_getcanvas_us = px_stats_now_us() - t_gc;
 			// clear the image, since it contains the last one
 			if (px_osd_need_clear(bmpBuff.pData))
 				memset(bmpBuff.pData,
@@ -2535,11 +2660,28 @@ static void draw_screenBMP2(bool OnlyAHI) {
 	}
 
 	// strcpy(osds[FULL_OVERLAY_ID].text,"$M $B Test");//"$M $B Test");
-	/* Always called: this is ALSO the reader of /tmp/MSPOSD.msg - skipping the
-	 * call entirely starved the pixel datalink widgets of the very line they
-	 * parse. The function itself stops before RENDERING when the pixel OSD
-	 * owns the canvas, so the stats are not printed twice in two fonts. */
-	DrawTextOnOSDBitmap(NULL);
+	/* This is ALSO the reader of /tmp/MSPOSD.msg - skipping the call entirely
+	 * starved the pixel datalink widgets of the very line they parse. The
+	 * function itself stops before RENDERING when the pixel OSD owns the
+	 * canvas, so the stats are not printed twice in two fonts.
+	 *
+	 * Rate-limited on the pixel path: expanding the message macros costs
+	 * tens of milliseconds a call (sysfs reads, /proc scans, a shell for the
+	 * venc figures) and the line it produces changes about once a second.
+	 * Ran every frame, it was the single biggest consumer of the event loop
+	 * that also services the flight controller's UART. The character OSD
+	 * keeps the every-frame call: its whole screen comes from here. */
+	uint64_t t_misc = px_stats_now_us();
+	if (px_osd_active() && !DrawOSD) {
+		static uint64_t last_msg_ms;
+		uint64_t now_ms = get_time_ms();
+		if (now_ms - last_msg_ms >= 250) {
+			last_msg_ms = now_ms;
+			DrawTextOnOSDBitmap(NULL);
+		}
+	} else
+		DrawTextOnOSDBitmap(NULL);
+	g_px_misc_us = px_stats_now_us() - t_misc;
 
 #if defined(__SIGMASTAR__)
 	/* AI fusion: the IPU worker's detection boxes go into the SAME canvas,
@@ -2639,7 +2781,9 @@ static void draw_screenBMP2(bool OnlyAHI) {
 	// LastDrawn));
 	if (DrawOSD || px_osd_active())
 		if (useDirectBMPBuffer) {
+			uint64_t t_up = px_stats_now_us();
 			int s32Ret = MI_RGN_UpdateCanvas(DEV osds[FULL_OVERLAY_ID].hand);
+			g_px_update_us = px_stats_now_us() - t_up;
 			bmpBuff.pData = NULL; // we must reset it so that we get it the next
 								  // iteration to draw!
 			if (verbose && s32Ret != 0)

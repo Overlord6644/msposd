@@ -35,6 +35,9 @@ typedef struct {
 	float spd_kph;    /* ground speed */
 	float vspd_ms;    /* vertical speed */
 	int   throttle_pct;
+	/* Average of the motors' eRPM/pole-pairs, from MSP_MOTOR_TELEMETRY.
+	 * Needs bidirectional DShot on the FC; stays 0 without it. */
+	float rpm_avg;
 
 	/* Navigation */
 	int   sats;

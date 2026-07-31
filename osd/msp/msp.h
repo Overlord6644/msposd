@@ -20,6 +20,7 @@
 #define MSP_CMD_RC_TUNING 111
 #define MSP_CMD_PID 112
 #define MSP_CMD_BATTERY_STATE 130
+#define MSP_MOTOR_TELEMETRY 139 // out message: per-motor rpm (bidir DShot), temp, current
 #define MSP_CMD_STATUS_EX 150
 #define MSP_UID 160    //out message         Unique device ID
 #define MSP_CMD_DISPLAYPORT 182

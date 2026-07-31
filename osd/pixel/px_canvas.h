@@ -31,6 +31,7 @@
 #define PX_WHITE       7
 #define PX_BLACK       8
 #define PX_SHADE       9  /* semi-transparent black - backdrops */
+#define PX_ORANGE     11  /* threshold step between yellow and red */
 #define PX_GRAY_LIGHT 13
 #define PX_GRAY_DARK  14
 #define PX_TRANSPARENT 15 /* the value msposd clears the canvas to */
@@ -75,9 +76,48 @@ void px_clip_reset(PxCanvas *c);
 void px_dirty_reset(PxDirty *d);
 /* 1 if anything was written since the reset, filling the (inclusive) box. */
 int  px_dirty_box(const PxDirty *d, int *x0, int *y0, int *x1, int *y1);
+/* Union of two boxes, into the first. An empty `b` is a no-op. */
+void px_dirty_add(PxDirty *d, const PxDirty *b);
+/* Area in pixels, 0 when empty. */
+long px_dirty_area(const PxDirty *d);
 /* Set a rectangle to transparent - clearing one widget's area rather than the
  * whole canvas. */
 void px_clear_rect(const PxCanvas *c, int x0, int y0, int x1, int y1);
+
+/* ---- regions ----
+ * A HUD's moving parts are scattered: the ladder is centred, the tapes sit on
+ * the left and right edges, the datalink figures across the top, the pack
+ * voltage at the bottom. One bounding box around all of them IS the whole
+ * canvas, so a single-box dirty region turns "redraw what moved" back into
+ * "redraw everything" the moment two distant widgets change in the same frame -
+ * and then copies a megabyte of uncached region memory to show it.
+ *
+ * A region keeps the boxes apart instead. Rectangles that overlap are merged
+ * (clearing the same pixels twice is worse than one bigger box), and when the
+ * list is full the pair whose merge wastes the fewest pixels is combined, so the
+ * count is bounded without ever losing coverage. Over-coverage is always safe;
+ * under-coverage would leave stale pixels on screen.
+ */
+#define PX_REGION_MAX 24
+
+typedef struct {
+	PxDirty r[PX_REGION_MAX];
+	int     n;
+} PxRegion;
+
+void px_region_reset(PxRegion *rg);
+/* Add a box, merging as described above. Empty boxes are ignored. */
+void px_region_add(PxRegion *rg, const PxDirty *b);
+/* Add every rectangle of `src`. */
+void px_region_merge(PxRegion *rg, const PxRegion *src);
+/* 1 when `b` intersects any rectangle in the region. */
+int  px_region_hits(const PxRegion *rg, const PxDirty *b);
+/* Total covered area in pixels (rectangles never overlap, so this is exact). */
+long px_region_area(const PxRegion *rg);
+/* Clip every rectangle to the canvas, dropping any that falls outside. */
+void px_region_clip(PxRegion *rg, int w, int h);
+/* Set every rectangle to transparent. */
+void px_region_clear(const PxCanvas *c, const PxRegion *rg);
 
 /* Single pixel, bounds-checked, honouring `behind`. */
 void px_set(const PxCanvas *c, int x, int y, uint8_t color);

@@ -88,6 +88,14 @@ typedef struct {
 	/* Text widgets only: a small vector icon drawn before the string, sized
 	 * to the text (PxIconKind, see px_icon.h). */
 	uint8_t icon;
+	/* Alert thresholds on the widget's value: past `warn` the widget turns
+	 * yellow, past `alert` orange, past `crit` red. Which direction is
+	 * "past" comes from the order of warn and crit - crit < warn means low
+	 * values are the problem (battery, RSSI, satellites), crit > warn means
+	 * high ones are (temperature, current). `alert` is optional (0 = skip
+	 * the orange step); warn and crit both 0 disables the whole idea.
+	 * Text and bar widgets. */
+	float warn, alert, crit;
 } PxWidget;
 
 typedef struct {
@@ -166,13 +174,21 @@ void px_layout_cache_reset(PxLayoutCache *cache);
 int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
 	const PxTelemetry *t, PxLayoutCache *cache);
 
-/* Same, with an extra rectangle the caller wants cleared and repaired this
+/* Same, with extra rectangles the caller wants cleared and repaired this
  * frame - for content it draws onto the canvas OUTSIDE the layout (detection
- * boxes). The union is cleared, widgets intersecting it are redrawn in depth
+ * boxes). They are cleared, widgets intersecting them are redrawn in depth
  * order, and the caller then repaints its own content on top. Without this,
  * whatever the caller drew last frame would simply stay on screen: nothing in
- * the cache knows to erase it. NULL or an empty rect means none. */
+ * the cache knows to erase it. NULL or an empty region means none.
+ *
+ * `out_touched`, when non-NULL, receives the rectangles this frame cleared or
+ * painted (including `extra`); empty when nothing changed. A caller keeping
+ * the canvas elsewhere (a shadow) can copy out exactly these areas instead of
+ * the whole surface. Kept as a rectangle LIST, not one bounding box: a HUD's
+ * moving widgets sit on opposite screen edges, so a single box around them is
+ * the whole canvas and the incremental path stops being incremental. */
 int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
-	const PxTelemetry *t, PxLayoutCache *cache, const PxDirty *extra);
+	const PxTelemetry *t, PxLayoutCache *cache, const PxRegion *extra,
+	PxRegion *out_touched);
 
 #endif /* PX_LAYOUT_H */

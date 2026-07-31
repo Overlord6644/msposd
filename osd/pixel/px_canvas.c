@@ -52,6 +52,147 @@ int px_dirty_box(const PxDirty *d, int *x0, int *y0, int *x1, int *y1)
 	return 1;
 }
 
+void px_dirty_add(PxDirty *d, const PxDirty *b)
+{
+	if (!b || b->x1 < b->x0)
+		return;
+	if (d->x1 < d->x0) {
+		*d = *b;
+		return;
+	}
+	if (b->x0 < d->x0) d->x0 = b->x0;
+	if (b->y0 < d->y0) d->y0 = b->y0;
+	if (b->x1 > d->x1) d->x1 = b->x1;
+	if (b->y1 > d->y1) d->y1 = b->y1;
+}
+
+long px_dirty_area(const PxDirty *d)
+{
+	if (!d || d->x1 < d->x0 || d->y1 < d->y0)
+		return 0;
+	return (long)(d->x1 - d->x0 + 1) * (long)(d->y1 - d->y0 + 1);
+}
+
+/* ---- regions ---- see px_canvas.h. */
+
+void px_region_reset(PxRegion *rg)
+{
+	rg->n = 0;
+}
+
+static int boxes_touch(const PxDirty *a, const PxDirty *b)
+{
+	/* One pixel of slack: two rectangles that merely abut are cheaper as one
+	 * box than as two, and it keeps the list from filling up with slivers. */
+	return !(a->x1 + 1 < b->x0 || b->x1 + 1 < a->x0 ||
+		 a->y1 + 1 < b->y0 || b->y1 + 1 < a->y0);
+}
+
+static long merge_waste(const PxDirty *a, const PxDirty *b)
+{
+	PxDirty u = *a;
+	px_dirty_add(&u, b);
+	return px_dirty_area(&u) - px_dirty_area(a) - px_dirty_area(b);
+}
+
+void px_region_add(PxRegion *rg, const PxDirty *b)
+{
+	if (!b || b->x1 < b->x0)
+		return;
+	PxDirty nb = *b;
+
+	/* Fold in everything the new box touches, repeatedly: a merge grows the
+	 * box, which can bring further rectangles into contact. */
+	for (int again = 1; again;) {
+		again = 0;
+		for (int i = 0; i < rg->n; i++) {
+			if (!boxes_touch(&rg->r[i], &nb))
+				continue;
+			px_dirty_add(&nb, &rg->r[i]);
+			rg->r[i] = rg->r[--rg->n];
+			again = 1;
+			break;
+		}
+	}
+
+	if (rg->n < PX_REGION_MAX) {
+		rg->r[rg->n++] = nb;
+		return;
+	}
+
+	/* Full: give up the least - the merge that adds the fewest pixels of
+	 * area. Candidates include pairing the newcomer with an existing box. */
+	int bi = -1, bj = -1;
+	long best = -1;
+	for (int i = 0; i < rg->n; i++) {
+		long wst = merge_waste(&rg->r[i], &nb);
+		if (best < 0 || wst < best) { best = wst; bi = i; bj = -1; }
+	}
+	for (int i = 0; i < rg->n; i++)
+		for (int j = i + 1; j < rg->n; j++) {
+			long wst = merge_waste(&rg->r[i], &rg->r[j]);
+			if (wst < best) { best = wst; bi = i; bj = j; }
+		}
+	if (bj < 0) {
+		px_dirty_add(&rg->r[bi], &nb);
+	} else {
+		px_dirty_add(&rg->r[bi], &rg->r[bj]);
+		rg->r[bj] = rg->r[--rg->n];
+		rg->r[rg->n++] = nb;
+	}
+}
+
+void px_region_merge(PxRegion *rg, const PxRegion *src)
+{
+	if (!src)
+		return;
+	for (int i = 0; i < src->n; i++)
+		px_region_add(rg, &src->r[i]);
+}
+
+int px_region_hits(const PxRegion *rg, const PxDirty *b)
+{
+	if (!rg || !b || b->x1 < b->x0)
+		return 0;
+	for (int i = 0; i < rg->n; i++) {
+		const PxDirty *a = &rg->r[i];
+		if (!(a->x1 < b->x0 || b->x1 < a->x0 ||
+		      a->y1 < b->y0 || b->y1 < a->y0))
+			return 1;
+	}
+	return 0;
+}
+
+long px_region_area(const PxRegion *rg)
+{
+	long a = 0;
+	for (int i = 0; i < rg->n; i++)
+		a += px_dirty_area(&rg->r[i]);
+	return a;
+}
+
+void px_region_clip(PxRegion *rg, int w, int h)
+{
+	for (int i = 0; i < rg->n;) {
+		PxDirty *r = &rg->r[i];
+		if (r->x0 < 0) r->x0 = 0;
+		if (r->y0 < 0) r->y0 = 0;
+		if (r->x1 > w - 1) r->x1 = w - 1;
+		if (r->y1 > h - 1) r->y1 = h - 1;
+		if (r->x1 < r->x0 || r->y1 < r->y0)
+			rg->r[i] = rg->r[--rg->n];
+		else
+			i++;
+	}
+}
+
+void px_region_clear(const PxCanvas *c, const PxRegion *rg)
+{
+	for (int i = 0; i < rg->n; i++)
+		px_clear_rect(c, rg->r[i].x0, rg->r[i].y0,
+			rg->r[i].x1, rg->r[i].y1);
+}
+
 void px_clear_rect(const PxCanvas *c, int x0, int y0, int x1, int y1)
 {
 	if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
@@ -128,8 +269,46 @@ uint8_t px_get(const PxCanvas *c, int x, int y)
 void px_hline(const PxCanvas *c, int x0, int x1, int y, uint8_t color)
 {
 	if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
-	for (int x = x0; x <= x1; x++)
-		px_set(c, x, y, color);
+	if (c->behind) {
+		/* Writes gated on what is already there: no run to batch. */
+		for (int x = x0; x <= x1; x++)
+			px_set(c, x, y, color);
+		return;
+	}
+	if (y < c->clip_y0 || y > c->clip_y1)
+		return;
+	if (x0 < c->clip_x0) x0 = c->clip_x0;
+	if (x1 > c->clip_x1) x1 = c->clip_x1;
+	if (x1 < x0)
+		return;
+	if (c->dirty) {
+		PxDirty *d = c->dirty;
+		if (d->x1 < d->x0) {
+			d->x0 = x0; d->x1 = x1;
+			d->y0 = d->y1 = y;
+		} else {
+			if (x0 < d->x0) d->x0 = x0;
+			if (x1 > d->x1) d->x1 = x1;
+			if (y < d->y0) d->y0 = y;
+			if (y > d->y1) d->y1 = y;
+		}
+	}
+	/* Whole bytes as a memset, the two possible half-byte ends by hand -
+	 * the same shape as px_clear_rect, for the same reason: a fill is the
+	 * inner loop of every bar, box and triangle on the screen. */
+	uint8_t *row = c->data + (size_t)y * c->stride;
+	int bx0 = x0 >> 1, bx1 = x1 >> 1;
+	uint8_t both = (uint8_t)((color & 0x0F) | (color << 4));
+	if (x0 & 1) {
+		row[bx0] = (uint8_t)((row[bx0] & 0x0F) | (color << 4));
+		bx0++;
+	}
+	if (!(x1 & 1) && bx1 >= bx0) {
+		row[bx1] = (uint8_t)((row[bx1] & 0xF0) | (color & 0x0F));
+		bx1--;
+	}
+	if (bx1 >= bx0)
+		memset(row + bx0, both, (size_t)(bx1 - bx0 + 1));
 }
 
 void px_vline(const PxCanvas *c, int x, int y0, int y1, uint8_t color)

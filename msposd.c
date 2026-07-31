@@ -1183,6 +1183,13 @@ static void send_variant_request2(int serial_fd) {
 			construct_msp_command(buffer, MSP_ANALOG, NULL, 0, MSP_OUTBOUND);
 			res = write(serial_fd, buffer, cmdlen);
 		}
+		/* Motor RPM for the pixel OSD's rpm widget. Twice a second reads
+		 * fine on screen and the answer is one of the larger replies
+		 * (13 bytes per motor), so it stays off the attitude frames. */
+		if (px_osd_active() && (VariantCounter == 9 || VariantCounter == 19)) {
+			construct_msp_command(buffer, MSP_MOTOR_TELEMETRY, NULL, 0, MSP_OUTBOUND);
+			res = write(serial_fd, buffer, cmdlen);
+		}
 	}
 		
 	VariantCounter++;

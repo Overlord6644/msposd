@@ -52,6 +52,7 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		 * the same thing on 3S and on 6S, the pack total does not. */
 		{"cell_volt",   t->cells > 0 ? t->volt_v / (float)t->cells : t->volt_v},
 		{"trip",        t->trip_m},
+		{"rpm",         t->rpm_avg},
 	};
 	for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
 		if (strcmp(map[i].n, source) == 0) {
@@ -123,8 +124,8 @@ static uint8_t parse_color(const char *s, uint8_t fallback)
 		{"yellow", PX_YELLOW}, {"magenta", PX_MAGENTA}, {"cyan", PX_CYAN},
 		{"white", PX_WHITE}, {"black", PX_BLACK}, {"shade", PX_SHADE},
 		{"gray", PX_GRAY_LIGHT}, {"graylight", PX_GRAY_LIGHT},
-		{"graydark", PX_GRAY_DARK}, {"none", PX_TRANSPARENT},
-		{"transparent", PX_TRANSPARENT},
+		{"graydark", PX_GRAY_DARK}, {"orange", PX_ORANGE},
+		{"none", PX_TRANSPARENT}, {"transparent", PX_TRANSPARENT},
 	};
 	if (!s || !*s)
 		return fallback;
@@ -327,6 +328,9 @@ int px_layout_load(PxLayout *l, const char *path)
 				fprintf(stderr, "[px_layout] '%s': unknown icon '%s'\n",
 					w->name, val);
 		}
+		else if (!strcmp(key, "warn"))         w->warn = strtof(val, NULL);
+		else if (!strcmp(key, "alert"))        w->alert = strtof(val, NULL);
+		else if (!strcmp(key, "crit"))         w->crit = strtof(val, NULL);
 		else if (!strcmp(key, "source"))       snprintf(w->source, sizeof(w->source), "%s", val);
 		else if (!strcmp(key, "format"))       snprintf(w->format, sizeof(w->format), "%s", val);
 		else if (!strcmp(key, "label"))        snprintf(w->label, sizeof(w->label), "%s", val);
@@ -349,6 +353,37 @@ int px_layout_load(PxLayout *l, const char *path)
 /* ---- drawing ---- */
 
 static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+/* The colour this widget should draw with right now: its own until the value
+ * crosses `warn` (yellow), `alert` (orange, optional) or `crit` (red). See
+ * the field comment in px_layout.h for how the thresholds' order picks the
+ * direction. The signature hashes this too, so crossing a threshold redraws
+ * the widget even when the printed number happens to be identical. */
+static uint8_t threshold_color(const PxWidget *w, const PxTelemetry *t,
+	uint8_t base)
+{
+	if (w->warn == w->crit) /* both 0, or genuinely equal: disabled */
+		return base;
+	float v = 0.0f;
+	if (!*w->source || !px_telemetry_value(t, w->source, &v))
+		return base;
+	if (w->crit < w->warn) { /* low is bad: battery, RSSI, sats */
+		if (v <= w->crit)
+			return PX_RED;
+		if (w->alert != 0.0f && v <= w->alert)
+			return PX_ORANGE;
+		if (v <= w->warn)
+			return PX_YELLOW;
+	} else {                 /* high is bad: temperature, current */
+		if (v >= w->crit)
+			return PX_RED;
+		if (w->alert != 0.0f && v >= w->alert)
+			return PX_ORANGE;
+		if (v >= w->warn)
+			return PX_YELLOW;
+	}
+	return base;
+}
 
 static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
@@ -380,13 +415,14 @@ static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
 		int tw = px_text_width(buf, w->size) + iw;
 		x -= (w->align == 1) ? tw / 2 : tw;
 	}
+	uint8_t col = threshold_color(w, t, w->color);
 	if (w->icon)
 		/* Optically centred on the cap band, not sat on the baseline: caps
 		 * are 0.70 of the size (see px_text.c), so a baseline-flush icon
 		 * sticks up past the text by nearly a third of its height. */
 		px_icon(c, x, w->y - (17 * w->size) / 20, w->size,
-			(PxIconKind)w->icon, w->color, w->edge);
-	px_text(c, x + iw, w->y, buf, w->size, w->color, w->edge);
+			(PxIconKind)w->icon, col, w->edge);
+	px_text(c, x + iw, w->y, buf, w->size, col, w->edge);
 }
 
 static void draw_bar(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
@@ -396,15 +432,16 @@ static void draw_bar(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
 	float frac = (w->max > w->min) ? clamp01((v - w->min) / (w->max - w->min)) : 0.0f;
 	int width = w->w > 0 ? w->w : 200;
 	int height = w->h > 0 ? w->h : 18;
+	uint8_t col = threshold_color(w, t, w->color);
 	if (w->fill != PX_TRANSPARENT)
 		px_fill_rect(c, w->x, w->y, w->x + width, w->y + height, w->fill);
 	int filled = (int)((float)(width - 2) * frac);
 	if (filled > 0)
 		px_fill_rect(c, w->x + 1, w->y + 1, w->x + 1 + filled,
-			w->y + height - 1, w->color);
+			w->y + height - 1, col);
 	px_rect(c, w->x, w->y, w->x + width, w->y + height, 1, w->edge);
 	if (*w->label)
-		px_text(c, w->x, w->y - 4, w->label, w->size, w->color, w->edge);
+		px_text(c, w->x, w->y - 4, w->label, w->size, col, w->edge);
 }
 
 /* Needle tip in pixels. Shared so the cache signature and the drawing cannot
@@ -562,25 +599,35 @@ static void draw_vario(const PxWidget *w, const PxCanvas *c,
 	int cx = w->x + aw;          /* arrows' centre column */
 	int gap = 3;
 
-	/* Stacked like the Betaflight glyph: up above, down below. Climbing
-	 * hides the down arrow, descending hides the up one - the symbol reads
-	 * before the sign of the number does. */
-	if (st >= 0) {
-		int base = w->y - gap / 2 - (st > 0 ? -gap / 2 : 0);
+	/* One arrow, matching the sign: green up climbing, red down descending.
+	 * Level gets a neutral dot instead - an arrow with no direction is a
+	 * lie, and nothing at all reads as a dead widget. */
+	if (st > 0) {
+		int base = w->y;
 		px_fill_triangle(c, cx, base - ah, cx - aw, base, cx + aw, base,
 			PX_GREEN);
 		if (w->edge != PX_TRANSPARENT)
 			px_triangle(c, cx, base - ah, cx - aw, base, cx + aw, base,
 				w->edge);
-	}
-	if (st <= 0) {
-		int top = w->y + gap / 2 + (st < 0 ? -gap / 2 : 0);
+	} else if (st < 0) {
+		int top = w->y - ah;
 		px_fill_triangle(c, cx, top + ah, cx - aw, top, cx + aw, top,
 			PX_RED);
 		if (w->edge != PX_TRANSPARENT)
 			px_triangle(c, cx, top + ah, cx - aw, top, cx + aw, top,
 				w->edge);
+	} else {
+		/* Level: a white horizontal bar, centred on the number's cap band
+		 * (baseline y + s/3, caps 0.70 of s), sitting between where the
+		 * two arrows point - neither of them, deliberately. */
+		int cy = w->y + s / 3 - (7 * s) / 20;
+		int hw = aw;
+		if (w->edge != PX_TRANSPARENT)
+			px_rect(c, cx - hw - 1, cy - 2, cx + hw + 1, cy + 2, 1,
+				w->edge);
+		px_fill_rect(c, cx - hw, cy - 1, cx + hw, cy + 1, PX_WHITE);
 	}
+	(void)gap;
 
 	char buf[24];
 	snprintf(buf, sizeof(buf), *w->format ? w->format : "%.1fM/S",
@@ -641,28 +688,6 @@ static void draw_widget(const PxWidget *w, const PxCanvas *c,
 	default:
 		break;
 	}
-}
-
-/* Union of two dirty boxes, so a frame can clear one region instead of many. */
-static void region_add(PxDirty *r, const PxDirty *b)
-{
-	if (b->x1 < b->x0)
-		return; /* empty */
-	if (r->x1 < r->x0) {
-		*r = *b;
-		return;
-	}
-	if (b->x0 < r->x0) r->x0 = b->x0;
-	if (b->y0 < r->y0) r->y0 = b->y0;
-	if (b->x1 > r->x1) r->x1 = b->x1;
-	if (b->y1 > r->y1) r->y1 = b->y1;
-}
-
-static int box_overlaps(const PxDirty *b, int x0, int y0, int x1, int y1)
-{
-	if (b->x1 < b->x0)
-		return 0;
-	return !(b->x1 < x0 || b->x0 > x1 || b->y1 < y0 || b->y0 > y1);
 }
 
 /* Draw order: by depth, stable, so widgets at the same z keep file order. Both
@@ -752,7 +777,8 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 	switch (w->type) {
 	case PX_W_TEXT: {
 		/* The rendered string is the ground truth: two different values that
-		 * format identically genuinely draw the same pixels. */
+		 * format identically genuinely draw the same pixels. The threshold
+		 * colour is part of what is drawn, so it is part of the signature. */
 		char buf[128];
 		const char *str = px_telemetry_text(t, w->source);
 		if (!*w->source)
@@ -766,6 +792,8 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 			else
 				snprintf(buf, sizeof(buf), *w->format ? w->format : "%.0f", v);
 		}
+		uint8_t col = threshold_color(w, t, w->color);
+		h = fnv1a(h, &col, sizeof(col));
 		return fnv1a(h, buf, strlen(buf));
 	}
 	case PX_W_BAR: {
@@ -774,6 +802,8 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		float frac = (w->max > w->min) ? clamp01((v - w->min) / (w->max - w->min)) : 0.0f;
 		int width = w->w > 0 ? w->w : 200;
 		int filled = (int)((float)(width - 2) * frac); /* whole pixels */
+		uint8_t col = threshold_color(w, t, w->color);
+		h = fnv1a(h, &col, sizeof(col));
 		return fnv1a(h, &filled, sizeof(filled));
 	}
 	case PX_W_GAUGE: {
@@ -831,12 +861,15 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
 	const PxTelemetry *t, PxLayoutCache *cache)
 {
-	return px_layout_draw_cached_ex(l, c, t, cache, NULL);
+	return px_layout_draw_cached_ex(l, c, t, cache, NULL, NULL);
 }
 
 int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
-	const PxTelemetry *t, PxLayoutCache *cache, const PxDirty *extra)
+	const PxTelemetry *t, PxLayoutCache *cache, const PxRegion *extra,
+	PxRegion *out_touched)
 {
+	if (out_touched)
+		px_region_reset(out_touched);
 	const float s = px_layout_scale_for(l, c);
 	int order[PX_LAYOUT_MAX_WIDGETS];
 	draw_order(l, order);
@@ -846,9 +879,14 @@ int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
 	int visible[PX_LAYOUT_MAX_WIDGETS];
 	int changed[PX_LAYOUT_MAX_WIDGETS];
 
-	/* Pass 1: what would each widget draw, and has that changed? */
-	PxDirty region;
-	px_dirty_reset(&region);
+	/* Pass 1: what would each widget draw, and has that changed? The stale
+	 * areas go into a rectangle LIST, not one bounding box: the moving parts
+	 * of a HUD sit on opposite edges of the screen (left tape, right tape,
+	 * datalink on top, battery at the bottom), so one box around any two of
+	 * them is most of the canvas and every widget in between would be redrawn
+	 * and copied out for no reason. */
+	PxRegion region;
+	px_region_reset(&region);
 	int any = 0;
 	for (int i = 0; i < l->count; i++) {
 		visible[i] = (l->layer_mask & (1u << l->widgets[i].layer)) != 0;
@@ -856,7 +894,7 @@ int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
 		if (!visible[i]) {
 			/* Just hidden: its pixels have to go. */
 			if (cache->sig[i] != 0 || cache->box[i].x1 >= cache->box[i].x0) {
-				region_add(&region, &cache->box[i]);
+				px_region_add(&region, &cache->box[i]);
 				cache->sig[i] = 0;
 				px_dirty_reset(&cache->box[i]);
 				any = 1;
@@ -872,13 +910,13 @@ int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
 			any = 1;
 			/* Where it was: that area must be cleared whether or not the widget
 			 * lands in the same place this time. */
-			region_add(&region, &cache->box[i]);
+			px_region_add(&region, &cache->box[i]);
 		}
 	}
 	/* Caller-drawn content (detection boxes): its old pixels must be cleared
 	 * and its new area repaired exactly like a moved widget's. */
-	if (extra && extra->x1 >= extra->x0) {
-		region_add(&region, extra);
+	if (extra && extra->n > 0) {
+		px_region_merge(&region, extra);
 		any = 1;
 	}
 	if (!any) {
@@ -886,17 +924,24 @@ int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
 		return 0;
 	}
 
-	/* Clear once, over the union. Per-widget clears cannot work when widgets
-	 * overlap: erasing the box of something behind would take a bite out of
-	 * whatever is drawn on top of it, and that widget - unchanged - would never
-	 * be redrawn to repair it. */
-	int rx0, ry0, rx1, ry1;
-	if (px_dirty_box(&region, &rx0, &ry0, &rx1, &ry1))
-		px_clear_rect(c, rx0, ry0, rx1, ry1);
+	/* Clear the stale rectangles. Rectangle-wise, not per-widget: erasing the
+	 * box of something behind would take a bite out of whatever is drawn on
+	 * top of it, so anything intersecting a cleared rectangle is redrawn in
+	 * pass 2, back to front, to repair the overlap. */
+	px_region_clip(&region, c->w, c->h);
+	px_region_clear(c, &region);
 
 	/* Pass 2: redraw, in depth order, everything that changed or that the clear
 	 * touched. Depth order matters: repairing an overlap only comes out right if
-	 * the widget in front is drawn after the one behind. */
+	 * the widget in front is drawn after the one behind.
+	 *
+	 * `painted` accumulates where redraws actually landed. A widget drawn this
+	 * frame can paint outside the cleared region (it moved, or it grew), and a
+	 * widget in FRONT of those fresh pixels must then repaint too or it would
+	 * end up underneath. Depth order makes this a single forward pass: by the
+	 * time a widget is considered, everything behind it has already landed. */
+	PxRegion painted;
+	px_region_reset(&painted);
 	PxDirty track;
 	PxCanvas tc = *c;
 	tc.dirty = &track;
@@ -906,8 +951,8 @@ int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
 		if (!visible[i])
 			continue;
 		int touched = changed[i] ||
-			(px_dirty_box(&region, &rx0, &ry0, &rx1, &ry1) &&
-			 box_overlaps(&cache->box[i], rx0, ry0, rx1, ry1));
+			px_region_hits(&region, &cache->box[i]) ||
+			px_region_hits(&painted, &cache->box[i]);
 		if (!touched)
 			continue;
 		px_dirty_reset(&track);
@@ -915,6 +960,12 @@ int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
 		cache->box[i] = track;
 		cache->sig[i] = sig[i];
 		redrawn++;
+		px_region_add(&painted, &track);
+	}
+	/* Everything cleared is touched too, painted over or not. */
+	if (out_touched) {
+		px_region_merge(out_touched, &painted);
+		px_region_merge(out_touched, &region);
 	}
 	cache->primed = 1;
 	return redrawn;

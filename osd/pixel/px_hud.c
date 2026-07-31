@@ -182,12 +182,24 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 	const int half = w / 2;
 	const int gap = w / 8;   /* centre gap, so the reticle stays readable */
 
-	/* Only the bars that can appear on screen: at 8 px per degree a 1080-tall
-	 * frame holds about +/-67 degrees, and drawing beyond that is wasted work
-	 * the dirty-rect cache would then have to clear. */
-	/* Only the graduations that can land inside the box. */
-	int reach = (int)(((float)h / 2.0f) / px_per_deg) + (int)step_deg * 2;
-	for (int d = -reach; d <= reach; d += (int)step_deg) {
+	/* Only the graduations that can land inside the box - a window around the
+	 * CURRENT pitch, not around zero. A window around zero looked identical
+	 * in level flight and silently emptied the ladder past the window edge:
+	 * at 8 px/deg in a 330 px box that was 40 degrees, nothing drawn beyond.
+	 * MSP pitch is defined on -90..+90, so the window clamps there. */
+	int win = (int)(((float)h / 2.0f) / px_per_deg) + (int)step_deg;
+	int d0 = (int)floorf((pitch_deg - (float)win) / step_deg) * (int)step_deg;
+	int d1 = (int)ceilf((pitch_deg + (float)win) / step_deg) * (int)step_deg;
+	if (d0 < -90) d0 = -90;
+	if (d1 > 90) d1 = 90;
+	/* d==0 in the loop below is the aircraft reference bar, pinned to the
+	 * reticle with NO offset - it draws whatever the window says, so the
+	 * loop range is stretched to always include it and the stragglers the
+	 * stretch lets in are skipped. */
+	for (int d = d0 > 0 ? 0 : d0; d <= (d1 < 0 ? 0 : d1);
+		d += (int)step_deg) {
+		if (d != 0 && (d < d0 || d > d1))
+			continue;
 		/* Offset along the ladder's own axis, perpendicular to the horizon.
 		 * The zero bar gets NO offset: it is the reference, pinned to the
 		 * reticle - its centre IS the crosshair, always. Roll turns it,
