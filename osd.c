@@ -2114,6 +2114,19 @@ static bool ReplaceWidgets_Slow(int *x, int *y) {
 
 static PxLayout g_px_layout;
 static int g_px_layout_loaded;
+/* One cache per canvas buffer. RGN reports several front buffers and may hand
+ * out a different one each frame; a single cache would then be stale every
+ * frame and the incremental path would never engage. Keyed by pointer, so
+ * double or triple buffering keeps working - each buffer remembers what it
+ * already holds. Its content is two or three frames old, which still leaves far
+ * less to redraw than a whole canvas. */
+#define PX_OSD_BUFS 4
+static struct {
+	uint8_t      *buf;
+	PxLayoutCache cache;
+} g_px_bufs[PX_OSD_BUFS];
+static PxLayoutCache *g_px_cache;   /* cache belonging to this frame's buffer */
+static int g_px_incremental;        /* this frame: the caller skipped the clear */
 
 int px_osd_load_layout(const char *path)
 {
@@ -2130,6 +2143,49 @@ int px_osd_load_layout(const char *path)
 int px_osd_active(void)
 {
 	return g_px_layout_loaded;
+}
+
+/*
+ * Whether the caller must clear the whole canvas this frame.
+ *
+ * Skipping it is what makes incremental drawing worth anything, but it is only
+ * sound when nothing else draws here and the pixels we left last frame are still
+ * in front of us. Two things can break that, and both are checked rather than
+ * assumed:
+ *   - the character OSD also drawing, which needs the full clear;
+ *   - RGN handing out a different front buffer (the driver reports several), so
+ *     last frame's pixels are in memory we are no longer looking at.
+ * Either way we clear and start the cache over, which costs the optimisation and
+ * keeps the picture correct.
+ */
+static int px_osd_need_clear(uint8_t *buf)
+{
+	g_px_incremental = 0;
+	g_px_cache = NULL;
+	if (!g_px_layout_loaded || DrawOSD || !buf)
+		return 1;
+
+	for (int i = 0; i < PX_OSD_BUFS; i++)
+		if (g_px_bufs[i].buf == buf) {
+			g_px_cache = &g_px_bufs[i].cache;
+			g_px_incremental = 1;
+			return 0; /* we know what this buffer already holds */
+		}
+
+	/* First sight of this buffer: clear it and start its cache. If more buffers
+	 * are in rotation than we track, slot 0 gets reused and that one buffer
+	 * simply receives full frames - correct, just not optimised. */
+	for (int i = 0; i < PX_OSD_BUFS; i++)
+		if (!g_px_bufs[i].buf) {
+			g_px_bufs[i].buf = buf;
+			g_px_cache = &g_px_bufs[i].cache;
+			px_layout_cache_reset(g_px_cache);
+			return 1;
+		}
+	g_px_bufs[0].buf = buf;
+	g_px_cache = &g_px_bufs[0].cache;
+	px_layout_cache_reset(g_px_cache);
+	return 1;
 }
 
 static void px_osd_fill(PxTelemetry *t)
@@ -2171,7 +2227,14 @@ static void px_osd_draw(void)
 		getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
 	PxTelemetry t;
 	px_osd_fill(&t);
-	px_layout_draw(&g_px_layout, &c, &t);
+	if (g_px_cache) {
+		/* Same call either way: on a freshly cleared buffer the cache was just
+		 * reset, so every widget is redrawn and recorded, and the next frame on
+		 * that buffer only touches what moved. */
+		px_layout_draw_cached(&g_px_layout, &c, &t, g_px_cache);
+	} else {
+		px_layout_draw(&g_px_layout, &c, &t);
+	}
 }
 
 static void draw_screenBMP2(bool OnlyAHI) {
@@ -2210,12 +2273,15 @@ static void draw_screenBMP2(bool OnlyAHI) {
 			//We need to get pointer to the canvas mem every iteration
 			bmpBuff.pData = get_directBMP(osds[FULL_OVERLAY_ID].hand);
 			// clear the image, since it contains the last one
-			memset(bmpBuff.pData, PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 ? 0xFF : 0x00,
-				bmpBuff.u32Height * getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
+			if (px_osd_need_clear(bmpBuff.pData))
+				memset(bmpBuff.pData,
+					PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 ? 0xFF : 0x00,
+					bmpBuff.u32Height * getRowStride(bmpBuff.u32Width,
+						PIXEL_FORMAT_BitsPerPixel));
 		} else
 			bmpBuff.pData = malloc(
 				bmpBuff.u32Height * getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
-	} else
+	} else if (px_osd_need_clear(bmpBuff.pData))
 		bmpBuff.pData = memset(bmpBuff.pData, PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 ? 0xFF : 0x00,
 			bmpBuff.u32Height * getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
 	// bmpBuff.pData = memset(bmpBuff.pData,  0xFF , bmpBuff.u32Height *
@@ -2394,7 +2460,7 @@ static void draw_screenBMP2(bool OnlyAHI) {
 	// printf("%lu set_bitmapB for:%d | %d
 	// ms\n",(uint32_t)get_time_ms()%10000, (uint32_t)(get_time_ms() -
 	// LastDrawn));
-	if (DrawOSD)
+	if (DrawOSD || px_osd_active())
 		if (useDirectBMPBuffer) {
 			int s32Ret = MI_RGN_UpdateCanvas(DEV osds[FULL_OVERLAY_ID].hand);
 			bmpBuff.pData = NULL; // we must reset it so that we get it the next
