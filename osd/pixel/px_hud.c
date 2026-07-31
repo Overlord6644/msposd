@@ -162,8 +162,8 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 		 * the graduations drift off the ladder's axis as roll grows, which
 		 * reads as the bars being centred on the screen vertical instead of
 		 * stacked square above and below the roll bar. */
-		int bx = cx + (int)lrintf(sa * off);
-		int by = cy + (int)lrintf(ca * off);
+		int bx = cx - (int)lrintf(sa * off);
+		int by = cy - (int)lrintf(ca * off);
 
 		int arm = (d == 0) ? half : half / 2;
 		int x0 = bx - (int)lrintf(ca * (float)arm);
