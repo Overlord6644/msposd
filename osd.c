@@ -2242,8 +2242,12 @@ static void draw_screenBMP2(bool OnlyAHI) {
 	if (cntr++ < 0) // skip in the beginning to show to font preview
 		return;
 
-	if (!DrawOSD && (get_time_ms() - LastDrawn) < 200) // No need to redraw text on screen
-													   // so often, lets keep low CPU load
+	/* This 200 ms floor is for the case where nothing is being drawn at all. A
+	 * pixel OSD is drawing, and is rate-limited by MinTimeBetweenScreenRefresh
+	 * just below, so it must not be pinned to 5 Hz here. */
+	if (!DrawOSD && !px_osd_active() &&
+		(get_time_ms() - LastDrawn) < 200) // No need to redraw text on screen
+										   // so often, lets keep low CPU load
 		return;
 
 	if ((get_time_ms() - LastDrawn) <
@@ -2914,8 +2918,23 @@ static void InitMSPHook() {
 	if (matrix_size == 9)
 		YOffs = (majestic_height - OVERLAY_HEIGHT); // vertical bottom
 
-	// THIS IS NEEDED, the main region to draw inside	
-	if (DrawOSD)
+	/* A pixel OSD is not laid out on the character grid, so it wants the whole
+	 * frame rather than the 53-column overlay (53 * 36 px rounded down to a
+	 * multiple of 8 is 1904, not 1920 - a right-aligned widget at x=1880 would
+	 * be clipped, and everything would sit 8 px right of where the layout says). */
+	if (px_osd_active() && !DrawOSD && majestic_width && majestic_height) {
+		OVERLAY_WIDTH = majestic_width & ~7;
+		OVERLAY_HEIGHT = majestic_height;
+		XOffs = 0;
+		YOffs = 0;
+		printf("[px_osd] full-frame overlay %dx%d\n",
+			OVERLAY_WIDTH, OVERLAY_HEIGHT);
+	}
+
+	// THIS IS NEEDED, the main region to draw inside
+	/* Also created for a pixel-only OSD: without a region there is no canvas to
+	 * draw into and nothing would ever reach the encoder. */
+	if (DrawOSD || px_osd_active())
 		rgn =
 			create_region(&osds[FULL_OVERLAY_ID].hand, XOffs, YOffs, OVERLAY_WIDTH, OVERLAY_HEIGHT);
 	if (verbose)
