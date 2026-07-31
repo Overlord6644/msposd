@@ -1870,6 +1870,12 @@ static char font[256];
 			return false;
 		}
 
+		/* Pixel OSD active: the file has been read into `osdmsg` (which is
+		 * all px_osd_fill needs) - stop before rendering the character-era
+		 * text block on top of the pixel widgets showing the same figures. */
+		if (px_osd_active() && !DrawOSD)
+			return false;
+
 		if (access(font, F_OK)) // no font file
 			return false;
 
@@ -2475,11 +2481,11 @@ static void draw_screenBMP2(bool OnlyAHI) {
 	}
 
 	// strcpy(osds[FULL_OVERLAY_ID].text,"$M $B Test");//"$M $B Test");
-	/* The info-message text block is the character era's datalink display; the
-	 * pixel OSD parses the same line into its own widgets, so drawing both
-	 * prints the link stats twice in two fonts. */
-	if (!px_osd_active())
-		DrawTextOnOSDBitmap(NULL);
+	/* Always called: this is ALSO the reader of /tmp/MSPOSD.msg - skipping the
+	 * call entirely starved the pixel datalink widgets of the very line they
+	 * parse. The function itself stops before RENDERING when the pixel OSD
+	 * owns the canvas, so the stats are not printed twice in two fonts. */
+	DrawTextOnOSDBitmap(NULL);
 
 #if defined(__SIGMASTAR__)
 	/* AI fusion: the IPU worker's detection boxes go into the SAME canvas,

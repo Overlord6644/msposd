@@ -1142,20 +1142,25 @@ static void send_variant_request2(int serial_fd) {
 	/* The pixel OSD reads the same telemetry the AHI does, so polling must
 	 * run for it too - not only when the graphic horizon is enabled. */
 	if (AHI_Enabled || px_osd_active()) {
-		if (AHI_Enabled >= 3 && (VariantCounter == 4 || VariantCounter == 14 )) {//twice per second home vector
+		/* The pixel OSD shows GPS, home and vario widgets, so it needs these
+		 * polls exactly like the character AHI at level 3 does - gating them
+		 * on AHI alone left sats/home/lat/lon/alt permanently at zero when
+		 * only -P was given. */
+		int wants_nav = (AHI_Enabled >= 3) || px_osd_active();
+		if (wants_nav && (VariantCounter == 4 || VariantCounter == 14 )) {//twice per second home vector
 			construct_msp_command(buffer, MSP_COMP_GPS, NULL, 0, MSP_OUTBOUND);
-			res = write(serial_fd, buffer, cmdlen);			 
+			res = write(serial_fd, buffer, cmdlen);
 		}
-		if (AHI_Enabled >= 3 && (VariantCounter == 5 || VariantCounter == 15 )) {//twice per second home vector
+		if (wants_nav && (VariantCounter == 5 || VariantCounter == 15 )) {//twice per second home vector
 			construct_msp_command(buffer, MSP_RAW_GPS, NULL, 0, MSP_OUTBOUND);
-			res = write(serial_fd, buffer, cmdlen);			 
-		}		
+			res = write(serial_fd, buffer, cmdlen);
+		}
 		if (VariantCounter==5 && (strlen(current_fc_uid)==0 || (get_current_time_ms()/1000)%5==0) ) {//every 5 seconds refresh it
 			construct_msp_command(buffer, MSP_UID, NULL, 0, MSP_OUTBOUND);
 			res = write(serial_fd, buffer, cmdlen);
 		}
 
-		if (AHI_Enabled>=3 && VariantCounter%2==1 ) {//every odd frame
+		if (wants_nav && VariantCounter%2==1 ) {//every odd frame
 			construct_msp_command(buffer, MSP_ALTITUDE, NULL, 0, MSP_OUTBOUND);
 			res = write(serial_fd, buffer, cmdlen);
 		}
