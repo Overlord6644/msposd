@@ -12,6 +12,7 @@ void px_canvas_init(PxCanvas *c, uint8_t *data, int w, int h, int stride)
 	c->h = h;
 	c->stride = stride;
 	c->behind = 0;
+	c->dirty = NULL;
 	px_clip_reset(c);
 }
 
@@ -33,6 +34,52 @@ void px_clip_reset(PxCanvas *c)
 	c->clip_y1 = c->h - 1;
 }
 
+void px_dirty_reset(PxDirty *d)
+{
+	/* Empty box: x1 < x0 means "nothing written yet". */
+	d->x0 = d->y0 = 1;
+	d->x1 = d->y1 = 0;
+}
+
+int px_dirty_box(const PxDirty *d, int *x0, int *y0, int *x1, int *y1)
+{
+	if (!d || d->x1 < d->x0)
+		return 0;
+	if (x0) *x0 = d->x0;
+	if (y0) *y0 = d->y0;
+	if (x1) *x1 = d->x1;
+	if (y1) *y1 = d->y1;
+	return 1;
+}
+
+void px_clear_rect(const PxCanvas *c, int x0, int y0, int x1, int y1)
+{
+	if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+	if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 >= c->w) x1 = c->w - 1;
+	if (y1 >= c->h) y1 = c->h - 1;
+	if (x1 < x0 || y1 < y0)
+		return;
+	/* Whole bytes get a memset; the two edge pixels, when the span starts or
+	 * ends mid-byte, are patched nibble-wise so a neighbour is not erased. */
+	for (int y = y0; y <= y1; y++) {
+		uint8_t *row = c->data + (size_t)y * c->stride;
+		int bx0 = x0 >> 1, bx1 = x1 >> 1;
+		if (x0 & 1) {
+			row[bx0] |= 0xF0; /* odd pixel = high nibble */
+			bx0++;
+		}
+		if (!(x1 & 1) && bx1 >= bx0) {
+			row[bx1] |= 0x0F;
+			bx1--;
+		}
+		if (bx1 >= bx0)
+			memset(row + bx0, 0xFF, (size_t)(bx1 - bx0 + 1));
+	}
+}
+
 void px_clear(const PxCanvas *c)
 {
 	/* 0xFF = two transparent pixels; this is what msposd memsets. */
@@ -46,6 +93,18 @@ void px_set(const PxCanvas *c, int x, int y, uint8_t color)
 {
 	if (x < c->clip_x0 || y < c->clip_y0 || x > c->clip_x1 || y > c->clip_y1)
 		return;
+	if (c->dirty) {
+		PxDirty *d = c->dirty;
+		if (d->x1 < d->x0) { /* first write since the reset */
+			d->x0 = d->x1 = x;
+			d->y0 = d->y1 = y;
+		} else {
+			if (x < d->x0) d->x0 = x;
+			if (x > d->x1) d->x1 = x;
+			if (y < d->y0) d->y0 = y;
+			if (y > d->y1) d->y1 = y;
+		}
+	}
 	uint8_t *p = c->data + (size_t)y * c->stride + (size_t)(x >> 1);
 	if (x & 1) {
 		if (c->behind && (*p >> 4) != PX_TRANSPARENT)

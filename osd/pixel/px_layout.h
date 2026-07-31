@@ -99,4 +99,29 @@ void px_layout_draw(const PxLayout *l, const PxCanvas *c, const PxTelemetry *t);
  * report what it rendered at. */
 float px_layout_scale_for(const PxLayout *l, const PxCanvas *c);
 
+/* ---- incremental drawing ----
+ * Redrawing every widget every frame means clearing the whole canvas first: at
+ * 1920x1080 that is a megabyte of I4 memset plus every glyph re-rasterised, for
+ * values that mostly did not change. With a cache, a widget is redrawn only when
+ * its displayed content changes, and only its own rectangle is cleared.
+ *
+ * This is only sound when the pixel OSD OWNS the canvas. If the character OSD is
+ * also drawing, msposd clears the whole surface each frame and the cached pixels
+ * are gone - use px_layout_draw() there.
+ *
+ * The cache is the caller's, so the layout itself stays const and one layout can
+ * be drawn to several canvases. */
+typedef struct {
+	uint32_t sig[PX_LAYOUT_MAX_WIDGETS];  /* what was drawn last time */
+	PxDirty  box[PX_LAYOUT_MAX_WIDGETS];  /* where it landed */
+	int      primed;                      /* 0 until the first full pass */
+} PxLayoutCache;
+
+void px_layout_cache_reset(PxLayoutCache *cache);
+
+/* Returns the number of widgets actually redrawn, so a caller can log how much
+ * work a frame cost. */
+int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
+	const PxTelemetry *t, PxLayoutCache *cache);
+
 #endif /* PX_LAYOUT_H */

@@ -35,6 +35,13 @@
 #define PX_GRAY_DARK  14
 #define PX_TRANSPARENT 15 /* the value msposd clears the canvas to */
 
+/* Bounding box of the pixels a drawing pass touched, inclusive; empty when
+ * x1 < x0. Held out of line so px_set() can update it through a const PxCanvas*
+ * - the canvas is not being modified, its dirty accumulator is. */
+typedef struct {
+	int x0, y0, x1, y1;
+} PxDirty;
+
 typedef struct {
 	uint8_t *data;   /* I4 pixels, two per byte */
 	int      w, h;   /* pixel dimensions */
@@ -47,6 +54,11 @@ typedef struct {
 	 * ladder cannot spill outside its own box - the same purpose as
 	 * FrSky's OSD_CMD_DRAWING_CLIP_TO_RECT. */
 	int      clip_x0, clip_y0, clip_x1, clip_y1;
+	/* Optional write accumulator. NULL disables tracking, which costs one
+	 * predictable branch per pixel; set it to learn exactly which region a
+	 * pass touched and refresh only that instead of memsetting a megabyte of
+	 * I4 every frame. */
+	PxDirty *dirty;
 } PxCanvas;
 
 void px_canvas_init(PxCanvas *c, uint8_t *data, int w, int h, int stride);
@@ -56,6 +68,16 @@ void px_clear(const PxCanvas *c);
  * whole canvas. Not stacked - callers save and restore if they need nesting. */
 void px_clip(PxCanvas *c, int x0, int y0, int x1, int y1);
 void px_clip_reset(PxCanvas *c);
+
+/* ---- dirty tracking ----
+ * px_set() grows the dirty box on every write. Reset it, draw, then read the
+ * box back to learn exactly what a widget touched. */
+void px_dirty_reset(PxDirty *d);
+/* 1 if anything was written since the reset, filling the (inclusive) box. */
+int  px_dirty_box(const PxDirty *d, int *x0, int *y0, int *x1, int *y1);
+/* Set a rectangle to transparent - clearing one widget's area rather than the
+ * whole canvas. */
+void px_clear_rect(const PxCanvas *c, int x0, int y0, int x1, int y1);
 
 /* Single pixel, bounds-checked, honouring `behind`. */
 void px_set(const PxCanvas *c, int x, int y, uint8_t color);

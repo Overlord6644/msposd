@@ -281,19 +281,28 @@ static void draw_bar(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
 		px_text(c, w->x, w->y - 4, w->label, w->size, w->color, w->edge);
 }
 
-static void draw_gauge(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
+/* Needle tip in pixels. Shared so the cache signature and the drawing cannot
+ * disagree about where the needle is - the whole failure mode this guards. */
+static void gauge_needle(const PxWidget *w, const PxTelemetry *t, int *nx, int *ny)
 {
 	float v = 0.0f;
 	px_telemetry_value(t, w->source, &v);
 	float frac = (w->max > w->min) ? clamp01((v - w->min) / (w->max - w->min)) : 0.0f;
 	int r = w->size > 0 ? w->size : 60;
-	/* A 240-degree sweep opening downwards reads like a instrument dial. */
+	float a = (210.0f - 240.0f * frac) * (float)M_PI / 180.0f;
+	*nx = w->x + (int)lrintf(cosf(a) * (float)(r - 8));
+	*ny = w->y - (int)lrintf(sinf(a) * (float)(r - 8));
+}
+
+static void draw_gauge(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
+{
+	int r = w->size > 0 ? w->size : 60;
+	/* A 240-degree sweep opening downwards reads like an instrument dial. */
 	px_arc(c, w->x, w->y, r, 210.0f, -30.0f, w->edge);
 	px_arc(c, w->x, w->y, r - 1, 210.0f, -30.0f, w->edge);
-	float a = (210.0f - 240.0f * frac) * (float)M_PI / 180.0f;
-	px_line_thick(c, w->x, w->y,
-		w->x + (int)lrintf(cosf(a) * (float)(r - 8)),
-		w->y - (int)lrintf(sinf(a) * (float)(r - 8)),
+	int nx, ny;
+	gauge_needle(w, t, &nx, &ny);
+	px_line_thick(c, w->x, w->y, nx, ny,
 		w->thickness > 0 ? w->thickness : 3, w->color);
 	px_disc(c, w->x, w->y, 3, w->color);
 	if (*w->label) {
@@ -305,16 +314,24 @@ static void draw_gauge(const PxWidget *w, const PxCanvas *c, const PxTelemetry *
 	}
 }
 
-static void draw_horizon(const PxWidget *w, const PxCanvas *c,
-	const PxTelemetry *t)
+/* Horizon line endpoints in pixels - see gauge_needle for why this is shared. */
+static void horizon_ends(const PxWidget *w, const PxTelemetry *t, int *x0,
+	int *y0, int *x1, int *y1)
 {
 	int half = (w->w > 0 ? w->w : 800) / 2;
 	float a = t->roll_deg * (float)M_PI / 180.0f;
 	int dy = (int)lrintf(t->pitch_deg * w->pitch_scale);
-	int x0 = w->x - (int)lrintf(cosf(a) * (float)half);
-	int y0 = w->y + dy + (int)lrintf(sinf(a) * (float)half);
-	int x1 = w->x + (int)lrintf(cosf(a) * (float)half);
-	int y1 = w->y + dy - (int)lrintf(sinf(a) * (float)half);
+	*x0 = w->x - (int)lrintf(cosf(a) * (float)half);
+	*y0 = w->y + dy + (int)lrintf(sinf(a) * (float)half);
+	*x1 = w->x + (int)lrintf(cosf(a) * (float)half);
+	*y1 = w->y + dy - (int)lrintf(sinf(a) * (float)half);
+}
+
+static void draw_horizon(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	int x0, y0, x1, y1;
+	horizon_ends(w, t, &x0, &y0, &x1, &y1);
 	px_line_thick(c, x0, y0, x1, y1, w->thickness > 0 ? w->thickness : 3,
 		w->color);
 	/* Fixed aircraft reference, so roll is read against something. */
@@ -323,21 +340,29 @@ static void draw_horizon(const PxWidget *w, const PxCanvas *c,
 	px_rect(c, w->x - 3, w->y - 3, w->x + 3, w->y + 3, 1, PX_YELLOW);
 }
 
-static void draw_arrow(const PxWidget *w, const PxCanvas *c,
-	const PxTelemetry *t)
+/* Arrow vertices in pixels - see gauge_needle for why this is shared. */
+static void arrow_pts(const PxWidget *w, const PxTelemetry *t, int *p)
 {
 	float deg = 0.0f;
 	px_telemetry_value(t, *w->source ? w->source : "home_bearing", &deg);
 	float a = deg * (float)M_PI / 180.0f;
 	int r = w->size > 0 ? w->size : 40;
+	p[0] = w->x + (int)lrintf(sinf(a) * (float)r);
+	p[1] = w->y - (int)lrintf(cosf(a) * (float)r);
+	p[2] = w->x + (int)lrintf(sinf(a + 2.5f) * (float)r * 0.6f);
+	p[3] = w->y - (int)lrintf(cosf(a + 2.5f) * (float)r * 0.6f);
+	p[4] = w->x + (int)lrintf(sinf(a - 2.5f) * (float)r * 0.6f);
+	p[5] = w->y - (int)lrintf(cosf(a - 2.5f) * (float)r * 0.6f);
+}
+
+static void draw_arrow(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
 	/* Rotated triangle: a glyph OSD would quantise this to a handful of
 	 * fixed arrow sprites. */
-	int ax = w->x + (int)lrintf(sinf(a) * (float)r);
-	int ay = w->y - (int)lrintf(cosf(a) * (float)r);
-	int bx = w->x + (int)lrintf(sinf(a + 2.5f) * (float)r * 0.6f);
-	int by = w->y - (int)lrintf(cosf(a + 2.5f) * (float)r * 0.6f);
-	int cx = w->x + (int)lrintf(sinf(a - 2.5f) * (float)r * 0.6f);
-	int cy = w->y - (int)lrintf(cosf(a - 2.5f) * (float)r * 0.6f);
+	int p[6];
+	arrow_pts(w, t, p);
+	int ax = p[0], ay = p[1], bx = p[2], by = p[3], cx = p[4], cy = p[5];
 	px_fill_triangle(c, ax, ay, bx, by, cx, cy, w->color);
 	if (w->edge != PX_TRANSPARENT)
 		px_triangle(c, ax, ay, bx, by, cx, cy, w->edge);
@@ -368,35 +393,162 @@ static void scale_widget(PxWidget *w, float s)
 	w->pitch_scale *= s;
 }
 
+static void draw_widget(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	switch (w->type) {
+	case PX_W_TEXT:    draw_text_widget(w, c, t); break;
+	case PX_W_BAR:     draw_bar(w, c, t);         break;
+	case PX_W_GAUGE:   draw_gauge(w, c, t);       break;
+	case PX_W_HORIZON: draw_horizon(w, c, t);     break;
+	case PX_W_ARROW:   draw_arrow(w, c, t);       break;
+	case PX_W_RECT:
+		if (w->fill != PX_TRANSPARENT)
+			px_fill_rect(c, w->x, w->y, w->x + w->w,
+				w->y + w->h, w->fill);
+		if (w->edge != PX_TRANSPARENT)
+			px_rect(c, w->x, w->y, w->x + w->w, w->y + w->h,
+				w->thickness, w->edge);
+		break;
+	default:
+		break;
+	}
+}
+
+/* Scaled copy of widget i, so both draw paths share one definition of geometry. */
+static const PxWidget *widget_scaled(const PxLayout *l, int i, float s,
+	PxWidget *tmp)
+{
+	const PxWidget *w = &l->widgets[i];
+	if (s == 1.0f)
+		return w;
+	*tmp = *w;
+	scale_widget(tmp, s);
+	return tmp;
+}
+
 void px_layout_draw(const PxLayout *l, const PxCanvas *c, const PxTelemetry *t)
 {
 	const float s = px_layout_scale_for(l, c);
 	for (int i = 0; i < l->count; i++) {
-		PxWidget scaled;
-		const PxWidget *w = &l->widgets[i];
-		/* Scale a copy so the layout keeps its authored numbers and the same
-		 * loaded layout can be drawn onto canvases of different sizes. */
-		if (s != 1.0f) {
-			scaled = *w;
-			scale_widget(&scaled, s);
-			w = &scaled;
-		}
-		switch (w->type) {
-		case PX_W_TEXT:    draw_text_widget(w, c, t); break;
-		case PX_W_BAR:     draw_bar(w, c, t);         break;
-		case PX_W_GAUGE:   draw_gauge(w, c, t);       break;
-		case PX_W_HORIZON: draw_horizon(w, c, t);     break;
-		case PX_W_ARROW:   draw_arrow(w, c, t);       break;
-		case PX_W_RECT:
-			if (w->fill != PX_TRANSPARENT)
-				px_fill_rect(c, w->x, w->y, w->x + w->w,
-					w->y + w->h, w->fill);
-			if (w->edge != PX_TRANSPARENT)
-				px_rect(c, w->x, w->y, w->x + w->w, w->y + w->h,
-					w->thickness, w->edge);
-			break;
-		default:
-			break;
-		}
+		PxWidget tmp;
+		draw_widget(widget_scaled(l, i, s, &tmp), c, t);
 	}
+}
+
+/* ---- incremental drawing ---- */
+
+void px_layout_cache_reset(PxLayoutCache *cache)
+{
+	memset(cache, 0, sizeof(*cache));
+	for (int i = 0; i < PX_LAYOUT_MAX_WIDGETS; i++)
+		px_dirty_reset(&cache->box[i]);
+	cache->primed = 0;
+}
+
+static uint32_t fnv1a(uint32_t h, const void *p, size_t n)
+{
+	const uint8_t *b = p;
+	while (n--) {
+		h ^= *b++;
+		h *= 16777619u;
+	}
+	return h;
+}
+
+/*
+ * A signature of what this widget would draw. Two frames with equal signatures
+ * are pixel-identical, so the second can be skipped.
+ *
+ * It hashes the integer PIXEL geometry the draw functions use - endpoints,
+ * vertices, filled pixel counts - not the telemetry value. Quantising the value
+ * independently was wrong and measurably so: a roll change too small to move a
+ * 0.25-degree bucket still moved the horizon line by a pixel, the signature said
+ * "unchanged", and the old pixels stayed on screen. Hashing what is drawn makes
+ * signature and pixels agree by construction, and still skips the frames where
+ * a value moves less than one pixel.
+ */
+static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
+{
+	uint32_t h = 2166136261u;
+	h = fnv1a(h, &w->type, sizeof(w->type));
+	h = fnv1a(h, &w->x, sizeof(w->x));
+	h = fnv1a(h, &w->y, sizeof(w->y));
+
+	switch (w->type) {
+	case PX_W_TEXT: {
+		/* The rendered string is the ground truth: two different values that
+		 * format identically genuinely draw the same pixels. */
+		char buf[128];
+		const char *str = px_telemetry_text(t, w->source);
+		if (str)
+			snprintf(buf, sizeof(buf), *w->format ? w->format : "%s", str);
+		else {
+			float v = 0.0f;
+			if (!px_telemetry_value(t, w->source, &v))
+				snprintf(buf, sizeof(buf), "?%s", w->source);
+			else
+				snprintf(buf, sizeof(buf), *w->format ? w->format : "%.0f", v);
+		}
+		return fnv1a(h, buf, strlen(buf));
+	}
+	case PX_W_BAR: {
+		float v = 0.0f;
+		px_telemetry_value(t, w->source, &v);
+		float frac = (w->max > w->min) ? clamp01((v - w->min) / (w->max - w->min)) : 0.0f;
+		int width = w->w > 0 ? w->w : 200;
+		int filled = (int)((float)(width - 2) * frac); /* whole pixels */
+		return fnv1a(h, &filled, sizeof(filled));
+	}
+	case PX_W_GAUGE: {
+		int nx, ny;
+		gauge_needle(w, t, &nx, &ny);
+		h = fnv1a(h, &nx, sizeof(nx));
+		return fnv1a(h, &ny, sizeof(ny));
+	}
+	case PX_W_HORIZON: {
+		int e[4];
+		horizon_ends(w, t, &e[0], &e[1], &e[2], &e[3]);
+		return fnv1a(h, e, sizeof(e));
+	}
+	case PX_W_ARROW: {
+		int p[6];
+		arrow_pts(w, t, p);
+		return fnv1a(h, p, sizeof(p));
+	}
+	default:
+		return h; /* static: signature never changes, drawn once */
+	}
+}
+
+int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
+	const PxTelemetry *t, PxLayoutCache *cache)
+{
+	const float s = px_layout_scale_for(l, c);
+	PxDirty track;
+	PxCanvas tc = *c;
+	tc.dirty = &track;
+	int redrawn = 0;
+
+	for (int i = 0; i < l->count; i++) {
+		PxWidget tmp;
+		const PxWidget *w = widget_scaled(l, i, s, &tmp);
+		uint32_t sig = widget_sig(w, t);
+
+		if (cache->primed && sig == cache->sig[i])
+			continue; /* identical pixels; leave them on the canvas */
+
+		/* Erase where it was, then draw where it goes, recording that. */
+		int x0, y0, x1, y1;
+		if (px_dirty_box(&cache->box[i], &x0, &y0, &x1, &y1))
+			px_clear_rect(c, x0, y0, x1, y1);
+
+		px_dirty_reset(&track);
+		draw_widget(w, &tc, t);
+		cache->box[i] = track;
+		cache->sig[i] = sig;
+		redrawn++;
+	}
+	cache->primed = 1;
+	return redrawn;
 }
