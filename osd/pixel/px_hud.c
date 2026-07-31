@@ -64,11 +64,18 @@ void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 	/* Heading in degrees above the pointer - the ribbon gives the feel,
 	 * the number gives the answer. */
 	/* \xb0 is the degree sign: px_text reads bytes as codepoints (Latin-1),
-	 * so the UTF-8 two-byte form would render a stray glyph before it. */
+	 * so the UTF-8 two-byte form would render a stray glyph before it.
+	 *
+	 * The DIGITS centre on the pointer and the degree sign trails: centring
+	 * digits-plus-sign shifts the number half a glyph left of the arrow, and
+	 * the number is what has to sit over it - at 1 as at 360. */
 	char buf[8];
 	int deg = ((int)lrintf(heading_deg) % 360 + 360) % 360;
+	int dw = 0;
+	snprintf(buf, sizeof(buf), "%d", deg);
+	dw = px_text_width(buf, text_size + 2);
 	snprintf(buf, sizeof(buf), "%d\xb0", deg);
-	label(c, cx, tick_top - 16, buf, text_size + 2, accent, edge);
+	px_text(c, cx - dw / 2, tick_top - 16, buf, text_size + 2, accent, edge);
 }
 
 void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
@@ -89,6 +96,20 @@ void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
 	PxCanvas tape = *c;
 	px_clip(&tape, x - 90, y, x + 90, y + h);
 
+	/* The value box's geometry anchors the scale labels too, so compute it
+	 * first: the readout digits and the scale digits form ONE column - a
+	 * scale number is read by sweeping up from the boxed value, and that
+	 * only works if they line up. */
+	char cur[16];
+	snprintf(cur, sizeof(cur), "%.0f", value);
+	const int pad = 8;
+	int cw = px_text_width(cur, text_size + 4);
+	int bh = text_size + 14;
+	const int nose_len = 10;
+	int bx0 = (dir > 0) ? x + tick_long + 4 + nose_len
+			   : x - tick_long - 4 - nose_len - cw - pad * 2;
+	int bx1 = bx0 + cw + pad * 2;
+
 	/* Ticks are pinned to values, not to the widget, so they slide as the value
 	 * changes - the movement is the reading. */
 	float first = value - span / 2.0f;
@@ -104,7 +125,10 @@ void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
 			char buf[16];
 			snprintf(buf, sizeof(buf), "%.0f", v);
 			int tw = px_text_width(buf, text_size);
-			int tx = (dir > 0) ? x + len + 6 : x - len - 6 - tw;
+			/* Aligned to the box digits: left edges when the readout is on
+			 * the right of the scale, right edges when on the left, so
+			 * varying digit counts still read as one column. */
+			int tx = (dir > 0) ? bx0 + pad : bx0 + pad + cw - tw;
 			px_text(&tape, tx, ty + text_size / 3, buf, text_size, color, edge);
 		}
 	}
@@ -117,15 +141,6 @@ void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
 	 * fill the two numbers overlap into an unreadable smudge. Opaque means the
 	 * graduations genuinely pass behind the readout, which is how a real tape
 	 * behaves. Drawn after the ticks for the same reason. */
-	char cur[16];
-	snprintf(cur, sizeof(cur), "%.0f", value);
-	const int pad = 8;
-	int cw = px_text_width(cur, text_size + 4);
-	int bh = text_size + 14;
-	const int nose_len = 10;
-	int bx0 = (dir > 0) ? x + tick_long + 4 + nose_len
-			   : x - tick_long - 4 - nose_len - cw - pad * 2;
-	int bx1 = bx0 + cw + pad * 2;
 	int ty0 = cy - bh / 2, ty1 = cy + bh / 2;
 	/* Pointed flag rather than a rectangle with a triangle stuck on it: the
 	 * outline follows the point, which is what makes it read as an indicator

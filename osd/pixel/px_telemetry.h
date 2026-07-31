@@ -38,6 +38,7 @@ typedef struct {
 
 	/* Navigation */
 	int   sats;
+	float trip_m;     /* ground distance travelled since boot */
 	float home_dist_m;
 	float home_bearing_deg; /* relative to nose, 0 = ahead */
 	/* Wire format, degrees * 1e7: a float rounds the 7th decimal away, and

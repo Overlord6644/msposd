@@ -51,6 +51,7 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		/* Per-cell voltage is the number a pilot actually flies by: 3.5 means
 		 * the same thing on 3S and on 6S, the pack total does not. */
 		{"cell_volt",   t->cells > 0 ? t->volt_v / (float)t->cells : t->volt_v},
+		{"trip",        t->trip_m},
 	};
 	for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
 		if (strcmp(map[i].n, source) == 0) {
@@ -58,6 +59,15 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 			return 1;
 		}
 	return 0;
+}
+
+/* Metres up close, kilometres once metres stop being readable. */
+static void fmt_auto_dist(char *buf, size_t n, float m)
+{
+	if (m >= 1000.0f)
+		snprintf(buf, n, "%.2fKM", m / 1000.0f);
+	else
+		snprintf(buf, n, "%.0fM", m);
 }
 
 /* Degrees * 1e7 to "46.1234567". Done on the raw integer: a float dropped the
@@ -83,11 +93,12 @@ const char *px_telemetry_text(const PxTelemetry *t, const char *source)
 	 * both call this within a frame, and different sources must not share. */
 	if (strcmp(source, "home_auto") == 0) {
 		static char buf[16];
-		/* Metres up close, kilometres once metres stop being readable. */
-		if (t->home_dist_m >= 1000.0f)
-			snprintf(buf, sizeof(buf), "%.2fKM", t->home_dist_m / 1000.0f);
-		else
-			snprintf(buf, sizeof(buf), "%.0fM", t->home_dist_m);
+		fmt_auto_dist(buf, sizeof(buf), t->home_dist_m);
+		return buf;
+	}
+	if (strcmp(source, "trip_auto") == 0) {
+		static char buf[16];
+		fmt_auto_dist(buf, sizeof(buf), t->trip_m);
 		return buf;
 	}
 	if (strcmp(source, "lat") == 0) {
@@ -369,8 +380,11 @@ static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
 		x -= (w->align == 1) ? tw / 2 : tw;
 	}
 	if (w->icon)
-		px_icon(c, x, w->y - w->size, w->size, (PxIconKind)w->icon,
-			w->color, w->edge);
+		/* Optically centred on the cap band, not sat on the baseline: caps
+		 * are 0.70 of the size (see px_text.c), so a baseline-flush icon
+		 * sticks up past the text by nearly a third of its height. */
+		px_icon(c, x, w->y - (17 * w->size) / 20, w->size,
+			(PxIconKind)w->icon, w->color, w->edge);
 	px_text(c, x + iw, w->y, buf, w->size, w->color, w->edge);
 }
 

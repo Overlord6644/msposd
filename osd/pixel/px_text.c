@@ -122,6 +122,20 @@ void px_text_metrics(int size_px, int *ascent, int *descent)
 		*descent = (int)(-lm.descender + 0.5);
 }
 
+/* One codepoint from a byte stream: two-byte UTF-8 sequences decode (that is
+ * where the degree sign lives, and layout files are written in UTF-8 by every
+ * editor on earth); a bare high byte falls back to Latin-1 rather than
+ * rendering a replacement. Longer sequences yield codepoints the OSD font
+ * does not have and get skipped by lookup, which is the right failure. */
+static uint32_t next_cp(const unsigned char **s)
+{
+	uint32_t c = *(*s)++;
+	if ((c & 0xE0) == 0xC0 && ((**s) & 0xC0) == 0x80) {
+		c = ((c & 0x1F) << 6) | (*(*s)++ & 0x3F);
+	}
+	return c;
+}
+
 int px_text_width(const char *text, int size_px)
 {
 	if (!g_font || !text || size_px <= 0)
@@ -129,10 +143,12 @@ int px_text_width(const char *text, int size_px)
 	SFT sft;
 	sft_for_size(&sft, size_px);
 	double pen = 0.0;
-	for (const unsigned char *s = (const unsigned char *)text; *s; s++) {
+	const unsigned char *s = (const unsigned char *)text;
+	while (*s) {
+		uint32_t cp = next_cp(&s);
 		SFT_Glyph gid;
 		SFT_GMetrics gm;
-		if (sft_lookup(&sft, *s, &gid) < 0)
+		if (sft_lookup(&sft, cp, &gid) < 0)
 			continue;
 		if (sft_gmetrics(&sft, gid, &gm) < 0)
 			continue;
@@ -155,10 +171,12 @@ int px_text(const PxCanvas *c, int x, int y, const char *text, int size_px,
 		return 0;
 
 	double pen = (double)x;
-	for (const unsigned char *s = (const unsigned char *)text; *s; s++) {
+	const unsigned char *s = (const unsigned char *)text;
+	while (*s) {
+		uint32_t cp = next_cp(&s);
 		SFT_Glyph gid;
 		SFT_GMetrics gm;
-		if (sft_lookup(&sft, *s, &gid) < 0)
+		if (sft_lookup(&sft, cp, &gid) < 0)
 			continue;
 		if (sft_gmetrics(&sft, gid, &gm) < 0)
 			continue;

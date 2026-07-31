@@ -2232,6 +2232,24 @@ static void px_osd_fill(PxTelemetry *t)
 	t->sats = last_numSat;
 	t->lat_e7 = last_lat_e7;
 	t->lon_e7 = last_lon_e7;
+	/* Trip odometer, integrated here because MSP carries no travelled
+	 * distance: ground speed times wall time between fills. Below 0.5 m/s the
+	 * sample is discarded - GPS speed noise on a parked aircraft would
+	 * otherwise add metres per minute of sitting still. Since boot, on
+	 * purpose: a battery swap should not zero the day's distance. */
+	{
+		static uint64_t trip_last_ms;
+		static float trip_m;
+		uint64_t now = get_time_ms();
+		if (trip_last_ms) {
+			float dt = (float)(now - trip_last_ms) / 1000.0f;
+			float ms = (float)last_speed / 100.0f; /* cm/s -> m/s */
+			if (ms > 0.5f && dt > 0.0f && dt < 5.0f)
+				trip_m += ms * dt;
+		}
+		trip_last_ms = now;
+		t->trip_m = trip_m;
+	}
 	t->home_dist_m = (float)last_distanceToHome;
 	t->home_bearing_deg = (float)last_directionToHome;
 	t->rssi_pct = last_rssi_pct < 0 ? 0 : last_rssi_pct;
