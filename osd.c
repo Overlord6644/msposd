@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include "osd/util/detections.h"
 #include <libgen.h> // For dirname()
 #include <math.h>
 #include <netinet/in.h>
@@ -2204,6 +2205,17 @@ static void draw_screenBMP2(bool OnlyAHI) {
 
 	// strcpy(osds[FULL_OVERLAY_ID].text,"$M $B Test");//"$M $B Test");
 	DrawTextOnOSDBitmap(NULL);
+
+#if defined(__SIGMASTAR__)
+	/* AI fusion: draw the IPU worker's detection boxes into the SAME canvas,
+	 * AFTER the OSD but only where the canvas is still transparent. That keeps
+	 * the OSD's fast memcpy glyph blit untouched (CPU!) while the boxes still
+	 * read as being *behind* the OSD. One region owner = no RGN conflict, which
+	 * this platform cannot do (see osd/util/detections.c). */
+	if (PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 && bmpBuff.pData != NULL)
+		draw_detections_i4(bmpBuff.pData, bmpBuff.u32Width, bmpBuff.u32Height,
+			getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
+#endif
 
 	stat_screen_refresh_count++;
 	uint64_t step3 = get_time_ms();
