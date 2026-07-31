@@ -227,4 +227,20 @@ void px_hud_crosshair(const PxCanvas *c, int cx, int cy, int size,
 		px_line(c, cx + sx, cy + sy, cx + ex, cy + ey, color);
 	}
 	px_set(c, cx, cy, color);
+
+	/* The aircraft reference bar: fixed wings either side, centred on the pip.
+	 * This is the bar the ladder's graduations are read against - it never
+	 * moves, the world does. Outer tips drop toward the ground so the symbol
+	 * still says which way is down when the video gives no other cue. */
+	const int span = size * 2;       /* wing length, each side */
+	const int wgap = arm + 4;        /* clear of the spikes    */
+	for (int s = -1; s <= 1; s += 2) {
+		int x0 = cx + s * wgap, x1 = cx + s * span;
+		if (edge != PX_TRANSPARENT) {
+			px_line_thick(c, x0, cy, x1, cy, 4, edge);
+			px_line_thick(c, x1, cy, x1, cy + 8, 4, edge);
+		}
+		px_line_thick(c, x0, cy, x1, cy, 2, color);
+		px_line_thick(c, x1, cy, x1, cy + 8, 2, color);
+	}
 }
