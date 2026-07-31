@@ -169,11 +169,24 @@ void px_line_thick(const PxCanvas *c, int x0, int y0, int x1, int y1,
 		px_set(c, x0, y0, color);
 		return;
 	}
+	/* Step whole pixels along the dominant axis of the normal, one copy per
+	 * row (or column). Rounding a scaled normal per copy - the previous
+	 * approach - collapses neighbouring offsets into the same pixel row as
+	 * soon as the line is not exactly axis-aligned: a "2 px" bar came out
+	 * 1 px with holes in its halo. This way a thickness of N is N contiguous
+	 * rows, always; the sub-pixel slant error is invisible at OSD widths. */
 	float nx = -dy / len, ny = dx / len;
-	for (int i = 0; i < thickness; i++) {
-		float o = (float)i - (float)(thickness - 1) / 2.0f;
-		int ox = (int)lrintf(nx * o), oy = (int)lrintf(ny * o);
-		px_line(c, x0 + ox, y0 + oy, x1 + ox, y1 + oy, color);
+	int s0 = -(thickness - 1) / 2;
+	if (fabsf(ny) >= fabsf(nx)) {
+		for (int r = s0; r < s0 + thickness; r++) {
+			int ox = (int)floorf(nx * (float)r / ny + 0.5f);
+			px_line(c, x0 + ox, y0 + r, x1 + ox, y1 + r, color);
+		}
+	} else {
+		for (int q = s0; q < s0 + thickness; q++) {
+			int oy = (int)floorf(ny * (float)q / nx + 0.5f);
+			px_line(c, x0 + q, y0 + oy, x1 + q, y1 + oy, color);
+		}
 	}
 }
 

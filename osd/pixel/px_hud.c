@@ -157,9 +157,13 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 		 * reticle - its centre IS the crosshair, always. Roll turns it,
 		 * pitch slides the graduations past it. */
 		float off = (d == 0) ? 0.0f : ((float)d - pitch_deg) * px_per_deg;
-		int ox = (int)lrintf(-sa * off);
-		int oy = (int)lrintf(-ca * off);
-		int bx = cx + ox, by = cy - oy;
+		/* Displace along (sa, ca): the true perpendicular of the rolled bar
+		 * (its direction is (ca, -sa), dot product zero). Anything else and
+		 * the graduations drift off the ladder's axis as roll grows, which
+		 * reads as the bars being centred on the screen vertical instead of
+		 * stacked square above and below the roll bar. */
+		int bx = cx + (int)lrintf(sa * off);
+		int by = cy + (int)lrintf(ca * off);
 
 		int arm = (d == 0) ? half : half / 2;
 		int x0 = bx - (int)lrintf(ca * (float)arm);
@@ -202,9 +206,11 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 		px_line(c, ix0, iy0, ix0 + tx, iy0 + ty, col);
 		px_line(c, ix1, iy1, ix1 + tx, iy1 + ty, col);
 
-		/* Label at the outer end of each segment, where nothing else is. */
+		/* Label at the outer end of each segment, where nothing else is.
+		 * Signed: below the horizon reads -10, not a bare 10 - the sign is
+		 * half the information. */
 		char buf[8];
-		snprintf(buf, sizeof(buf), "%d", d < 0 ? -d : d);
+		snprintf(buf, sizeof(buf), "%d", d);
 		int tw = px_text_width(buf, text_size);
 		px_text(c, x0 - tw - 8, y0 + text_size / 3, buf, text_size, col, edge);
 		px_text(c, x1 + 8, y1 + text_size / 3, buf, text_size, col, edge);
