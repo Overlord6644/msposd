@@ -84,6 +84,9 @@ typedef struct {
 	 * separate files and a restart. */
 	int layer;
 	int  align;      /* 0 left, 1 centre, 2 right */
+	/* Text widgets only: a small vector icon drawn before the string, sized
+	 * to the text (PxIconKind, see px_icon.h). */
+	uint8_t icon;
 } PxWidget;
 
 typedef struct {

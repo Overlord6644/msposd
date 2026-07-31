@@ -1,0 +1,7 @@
+The OSD icon bitmaps in px_icon_data.h are derived from Twemoji 14.0.2
+graphics (https://github.com/twitter/twemoji), copyright Twitter, Inc. and
+other contributors, licensed under CC-BY 4.0
+(https://creativecommons.org/licenses/by/4.0/).
+
+Modifications: downscaled to 40x40 and quantised to the 16-colour I4 overlay
+palette defined in bmp/bitmap.c (see tools notes in the repository).

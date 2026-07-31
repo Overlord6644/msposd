@@ -1,6 +1,7 @@
 /* px_layout.c - see px_layout.h. */
 #include "px_layout.h"
 #include "px_hud.h"
+#include "px_icon.h"
 #include "px_text.h"
 
 #include <math.h>
@@ -46,6 +47,10 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		{"dl_bw",       (float)t->dl.bandwidth_mhz},
 		{"dl_q",        (float)t->dl.pubq},
 		{"armed",       (float)t->armed},
+		{"cells",       (float)t->cells},
+		/* Per-cell voltage is the number a pilot actually flies by: 3.5 means
+		 * the same thing on 3S and on 6S, the pack total does not. */
+		{"cell_volt",   t->cells > 0 ? t->volt_v / (float)t->cells : t->volt_v},
 	};
 	for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
 		if (strcmp(map[i].n, source) == 0) {
@@ -53,6 +58,15 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 			return 1;
 		}
 	return 0;
+}
+
+/* Degrees * 1e7 to "46.1234567". Done on the raw integer: a float dropped the
+ * 7th decimal before it ever reached the formatter. */
+static void fmt_coord(char *buf, size_t n, int32_t e7)
+{
+	const char *sign = e7 < 0 ? "-" : "";
+	uint32_t v = e7 < 0 ? (uint32_t)(-(int64_t)e7) : (uint32_t)e7;
+	snprintf(buf, n, "%s%u.%07u", sign, v / 10000000u, v % 10000000u);
 }
 
 const char *px_telemetry_text(const PxTelemetry *t, const char *source)
@@ -63,6 +77,29 @@ const char *px_telemetry_text(const PxTelemetry *t, const char *source)
 		return t->mode;
 	if (strcmp(source, "msg") == 0)
 		return t->msg;
+	if (strcmp(source, "armed") == 0)
+		return t->armed ? "ARMED" : "DISARMED";
+	/* Static buffers, one per source: the draw pass and the cache signature
+	 * both call this within a frame, and different sources must not share. */
+	if (strcmp(source, "home_auto") == 0) {
+		static char buf[16];
+		/* Metres up close, kilometres once metres stop being readable. */
+		if (t->home_dist_m >= 1000.0f)
+			snprintf(buf, sizeof(buf), "%.2fKM", t->home_dist_m / 1000.0f);
+		else
+			snprintf(buf, sizeof(buf), "%.0fM", t->home_dist_m);
+		return buf;
+	}
+	if (strcmp(source, "lat") == 0) {
+		static char buf[20];
+		fmt_coord(buf, sizeof(buf), t->lat_e7);
+		return buf;
+	}
+	if (strcmp(source, "lon") == 0) {
+		static char buf[20];
+		fmt_coord(buf, sizeof(buf), t->lon_e7);
+		return buf;
+	}
 	return NULL;
 }
 
@@ -272,6 +309,12 @@ int px_layout_load(PxLayout *l, const char *path)
 			fprintf(stderr, "[px_layout] '%s': layer %s out of range"
 				" (0..7)\n", w->name, val);
 	}
+		else if (!strcmp(key, "icon")) {
+			w->icon = (uint8_t)px_icon_parse(val);
+			if (w->icon == PX_ICON_NONE && strcmp(val, "none"))
+				fprintf(stderr, "[px_layout] '%s': unknown icon '%s'\n",
+					w->name, val);
+		}
 		else if (!strcmp(key, "source"))       snprintf(w->source, sizeof(w->source), "%s", val);
 		else if (!strcmp(key, "format"))       snprintf(w->format, sizeof(w->format), "%s", val);
 		else if (!strcmp(key, "label"))        snprintf(w->label, sizeof(w->label), "%s", val);
@@ -315,12 +358,20 @@ static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
 			snprintf(buf, sizeof(buf), *w->format ? w->format : "%.0f", v);
 		}
 	}
+	/* The icon is part of the widget's width: alignment moves icon and text
+	 * as one block, or a centred readout would sit off-centre by half an
+	 * icon. */
+	int iw = w->icon ? px_icon_width(w->size, (PxIconKind)w->icon) + w->size / 4
+			 : 0;
 	int x = w->x;
 	if (w->align) {
-		int tw = px_text_width(buf, w->size);
+		int tw = px_text_width(buf, w->size) + iw;
 		x -= (w->align == 1) ? tw / 2 : tw;
 	}
-	px_text(c, x, w->y, buf, w->size, w->color, w->edge);
+	if (w->icon)
+		px_icon(c, x, w->y - w->size, w->size, (PxIconKind)w->icon,
+			w->color, w->edge);
+	px_text(c, x + iw, w->y, buf, w->size, w->color, w->edge);
 }
 
 static void draw_bar(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
@@ -400,19 +451,26 @@ static void draw_horizon(const PxWidget *w, const PxCanvas *c,
 	px_rect(c, w->x - 3, w->y - 3, w->x + 3, w->y + 3, 1, PX_YELLOW);
 }
 
-/* Arrow vertices in pixels - see gauge_needle for why this is shared. */
+/* Arrow vertices in pixels - see gauge_needle for why this is shared.
+ * A proper arrow - shaft plus head - not a bare triangle: rotated a few
+ * degrees, a triangle is an ambiguous wedge; a shaft says unambiguously
+ * where the tail is. p = tip, head-left, head-right, tail (8 ints). */
 static void arrow_pts(const PxWidget *w, const PxTelemetry *t, int *p)
 {
 	float deg = 0.0f;
 	px_telemetry_value(t, *w->source ? w->source : "home_bearing", &deg);
 	float a = deg * (float)M_PI / 180.0f;
+	float sa = sinf(a), ca = cosf(a);
 	int r = w->size > 0 ? w->size : 40;
-	p[0] = w->x + (int)lrintf(sinf(a) * (float)r);
-	p[1] = w->y - (int)lrintf(cosf(a) * (float)r);
-	p[2] = w->x + (int)lrintf(sinf(a + 2.5f) * (float)r * 0.6f);
-	p[3] = w->y - (int)lrintf(cosf(a + 2.5f) * (float)r * 0.6f);
-	p[4] = w->x + (int)lrintf(sinf(a - 2.5f) * (float)r * 0.6f);
-	p[5] = w->y - (int)lrintf(cosf(a - 2.5f) * (float)r * 0.6f);
+	/* rot(px,py): widget-local (x right, y up), 0 deg = straight up */
+#define ROT_X(px, py) (w->x + (int)lrintf(((float)(px)) * ca + ((float)(py)) * sa))
+#define ROT_Y(px, py) (w->y + (int)lrintf(((float)(px)) * sa - ((float)(py)) * ca))
+	p[0] = ROT_X(0, r);              p[1] = ROT_Y(0, r);              /* tip  */
+	p[2] = ROT_X(-r / 2, r / 4);     p[3] = ROT_Y(-r / 2, r / 4);     /* head */
+	p[4] = ROT_X(r / 2, r / 4);      p[5] = ROT_Y(r / 2, r / 4);
+	p[6] = ROT_X(0, -r);             p[7] = ROT_Y(0, -r);             /* tail */
+#undef ROT_X
+#undef ROT_Y
 }
 
 static void draw_compass(const PxWidget *w, const PxCanvas *c,
@@ -451,14 +509,18 @@ static void draw_ladder(const PxWidget *w, const PxCanvas *c,
 static void draw_arrow(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
 {
-	/* Rotated triangle: a glyph OSD would quantise this to a handful of
-	 * fixed arrow sprites. */
-	int p[6];
+	/* Shaft-and-head arrow, rotated continuously: a glyph OSD would
+	 * quantise this to a handful of fixed arrow sprites. */
+	int p[8];
 	arrow_pts(w, t, p);
-	int ax = p[0], ay = p[1], bx = p[2], by = p[3], cx = p[4], cy = p[5];
-	px_fill_triangle(c, ax, ay, bx, by, cx, cy, w->color);
+	int th = w->thickness > 0 ? w->thickness : 2;
 	if (w->edge != PX_TRANSPARENT)
-		px_triangle(c, ax, ay, bx, by, cx, cy, w->edge);
+		px_line_thick(c, p[6] + 1, p[7] + 1, p[0] + 1, p[1] + 1, th + 2,
+			w->edge);
+	px_line_thick(c, p[6], p[7], p[0], p[1], th, w->color);
+	px_fill_triangle(c, p[0], p[1], p[2], p[3], p[4], p[5], w->color);
+	if (w->edge != PX_TRANSPARENT)
+		px_triangle(c, p[0], p[1], p[2], p[3], p[4], p[5], w->edge);
 }
 
 float px_layout_scale_for(const PxLayout *l, const PxCanvas *c)
@@ -660,7 +722,7 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		return fnv1a(h, e, sizeof(e));
 	}
 	case PX_W_ARROW: {
-		int p[6];
+		int p[8];
 		arrow_pts(w, t, p);
 		return fnv1a(h, p, sizeof(p));
 	}

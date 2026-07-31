@@ -145,6 +145,13 @@ static int16_t last_altitude = 0;
 static int16_t last_speed = 0;
 static int16_t last_vario = 0; //cm/s
 
+/* Position and fix quality, from MSP_RAW_GPS. Coordinates stay in the wire
+ * format (degrees * 1e7): a float would round the 7th decimal away, and the
+ * OSD prints them, it does not compute with them. */
+static uint8_t last_numSat = 0;
+static int32_t last_lat_e7 = 0;
+static int32_t last_lon_e7 = 0;
+
 /* Battery and link, from MSP_CMD_BATTERY_STATE and MSP_ANALOG. The pixel OSD
  * needs values rather than the character cells DisplayPort would hand us. */
 static uint16_t last_vbat_cv = 0;     /* centivolts */
@@ -542,10 +549,13 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	}
 
 	case MSP_RAW_GPS: {
+		last_numSat = msp_message->payload[1];
+		last_lat_e7 = *(int32_t *)&msp_message->payload[2];
+		last_lon_e7 = *(int32_t *)&msp_message->payload[6];
 		last_groundCourse = *(int16_t *)&msp_message->payload[14] / 10; // protocol sends tenths of degrees
 		last_altitude = *(int16_t *)&msp_message->payload[10];
 		last_speed = *(int16_t *)&msp_message->payload[12];
-		//last_groundCourse = last_heading + stat_msp_ttl%90 -45; //Simulate offset 
+		//last_groundCourse = last_heading + stat_msp_ttl%90 -45; //Simulate offset
 		break;
 	}
 	case MSP_ALTITUDE: {
@@ -2205,11 +2215,20 @@ static void px_osd_fill(PxTelemetry *t)
 	t->alt_m = (float)last_altitude;
 	t->spd_kph = (float)last_speed * 0.036f;   /* cm/s -> km/h */
 	t->vspd_ms = (float)last_vario / 100.0f;   /* cm/s -> m/s */
-	t->sats = 0;
+	t->sats = last_numSat;
+	t->lat_e7 = last_lat_e7;
+	t->lon_e7 = last_lon_e7;
 	t->home_dist_m = (float)last_distanceToHome;
 	t->home_bearing_deg = (float)last_directionToHome;
 	t->rssi_pct = last_rssi_pct < 0 ? 0 : last_rssi_pct;
 	t->lq_pct = 0;
+	t->armed = armed ? 1 : 0;
+	/* Cell count from BATTERY_STATE when the FC sends it; estimated from the
+	 * pack voltage otherwise. 4.4V/cell covers a fresh HV pack without
+	 * misreading a sagged one a cell short. */
+	t->cells = last_batt_cells;
+	if (t->cells <= 0 && t->volt_v > 1.0f)
+		t->cells = (int)((t->volt_v + 4.39f) / 4.4f);
 	snprintf(t->mode, sizeof(t->mode), "%s", current_fc_identifier);
 	if (strlen(air_unit_info_msg) > 1)
 		snprintf(t->msg, sizeof(t->msg), "%s", air_unit_info_msg);

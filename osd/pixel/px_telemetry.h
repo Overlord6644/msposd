@@ -28,6 +28,7 @@ typedef struct {
 	float curr_a;
 	int   mah_used;
 	int   batt_pct;
+	int   cells;      /* 0 = unknown */
 
 	/* Flight */
 	float alt_m;      /* relative altitude */
@@ -39,6 +40,10 @@ typedef struct {
 	int   sats;
 	float home_dist_m;
 	float home_bearing_deg; /* relative to nose, 0 = ahead */
+	/* Wire format, degrees * 1e7: a float rounds the 7th decimal away, and
+	 * the OSD prints coordinates, it does not compute with them. */
+	int32_t lat_e7;
+	int32_t lon_e7;
 
 	/* Link. rssi/lq come from the flight controller; `dl' comes from the
 	 * air unit's own adaptive-link daemon, which knows things the FC cannot

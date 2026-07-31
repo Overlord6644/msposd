@@ -21,10 +21,17 @@ void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 		return;
 	const float px_per_deg = (float)w / span_deg;
 	const int half = w / 2;
+	/* Top to bottom: heading readout, pointer aiming down at the ribbon,
+	 * tick row, cardinal labels UNDER their ticks. The readout and pointer
+	 * are fixed; only the ribbon slides. */
+	const int tick_top = y;
+	const int tick_len = 8, tick_major = 13;
+
 	/* Clip so ticks scrolling in from either side stop at the ribbon's edge
-	 * instead of running across the frame. */
+	 * instead of running across the frame. Labels hang below the ticks. */
 	PxCanvas rib = *c;
-	px_clip(&rib, cx - half, y - text_size - 14, cx + half, y + 16);
+	px_clip(&rib, cx - half, tick_top, cx + half,
+		tick_top + tick_major + text_size + 8);
 
 	/* Walk absolute headings around the current one so the ticks stay pinned to
 	 * the world and slide past the aircraft, which is what makes a ribbon
@@ -37,17 +44,31 @@ void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 		int x = cx + (int)lrintf(delta * px_per_deg);
 		int deg = ((int)lrintf(a) % 360 + 360) % 360;
 
-		int cardinal = (deg % 90) == 0;
-		px_vline(&rib, x, y - (cardinal ? 12 : 7), y, color);
-		if (cardinal) {
-			static const char *n[] = {"N", "E", "S", "W"};
-			label(&rib, x, y - 16, n[deg / 90], text_size,
-				deg == 0 ? accent : color, edge);
+		/* All eight winds get a name, not just the four cardinals: at a
+		 * glance NW is a direction, 315 is arithmetic. */
+		int named = (deg % 45) == 0;
+		px_vline(&rib, x, tick_top, tick_top + (named ? tick_major : tick_len),
+			color);
+		if (named) {
+			static const char *n[] = {"N", "NE", "E", "SE", "S", "SW",
+				"W", "NW"};
+			label(&rib, x, tick_top + tick_major + text_size + 2,
+				n[deg / 45], text_size, deg == 0 ? accent : color, edge);
 		}
 	}
-	/* Fixed pointer: a filled triangle at the centre, so the ribbon reads
-	 * against the aircraft rather than the frame. */
-	px_fill_triangle(c, cx, y + 10, cx - 7, y + 1, cx + 7, y + 1, accent);
+
+	/* Fixed pointer above the ribbon, aiming down at it. */
+	px_fill_triangle(c, cx, tick_top - 2, cx - 7, tick_top - 11,
+		cx + 7, tick_top - 11, accent);
+
+	/* Heading in degrees above the pointer - the ribbon gives the feel,
+	 * the number gives the answer. */
+	/* \xb0 is the degree sign: px_text reads bytes as codepoints (Latin-1),
+	 * so the UTF-8 two-byte form would render a stray glyph before it. */
+	char buf[8];
+	int deg = ((int)lrintf(heading_deg) % 360 + 360) % 360;
+	snprintf(buf, sizeof(buf), "%d\xb0", deg);
+	label(c, cx, tick_top - 16, buf, text_size + 2, accent, edge);
 }
 
 void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,

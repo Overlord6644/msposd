@@ -16,14 +16,13 @@ static char g_font_path[256];
  *
  * Faces disagree wildly about how much of the em the design fills: JetBrains
  * Mono puts a capital at 0.73 em, UAV OSD Mono - drawn from a Reaper display,
- * where the glyphs ARE the cell - fills it completely. Asking both for "size 30"
- * gives caps of 22 and 30 px, and text 44% wider in the second, so swapping the
- * font would silently invalidate every coordinate in the layout.
+ * where the glyphs ARE the cell - fills it completely. Asking both for "size
+ * 30" gives caps of 22 and 30 px, and text 44% wider in the second, so
+ * swapping the font would silently invalidate every coordinate in the layout.
  *
- * So the requested size is treated as a cap height and converted to whatever em
- * that face needs. PX_CAP_RATIO is the conventional ratio a typical text face
- * has, which keeps existing layouts reading as they did while making the number
- * portable across faces. */
+ * So the em is scaled per face until a capital fills PX_CAP_RATIO of the
+ * requested size - the ratio a typical text face has, which keeps layouts
+ * tuned before this existed reading exactly as they did. */
 #define PX_CAP_RATIO 0.70
 #define PX_CAP_PROBE 64 /* em size used for the one-off measurement */
 static double g_cap_k = 1.0;
