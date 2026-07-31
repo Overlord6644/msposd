@@ -60,8 +60,8 @@ typedef struct {
 	char source[PX_LAYOUT_STR];
 	char format[PX_LAYOUT_STR];
 	char label[PX_LAYOUT_STR];
-	float min, max;  /* value range for bar/gauge */
-	float scale;     /* horizon: pixels per degree of pitch */
+	float min, max;    /* value range for bar/gauge */
+	float pitch_scale; /* horizon: pixels per degree of pitch */
 	int  align;      /* 0 left, 1 centre, 2 right */
 } PxWidget;
 
@@ -69,14 +69,34 @@ typedef struct {
 	char     font[192];
 	PxWidget widgets[PX_LAYOUT_MAX_WIDGETS];
 	int      count;
+	/* Global geometry multiplier, applied at draw time to every position, size
+	 * and thickness (value ranges are data and are left alone).
+	 *
+	 * A layout is written in pixels and the overlay canvas is whatever the
+	 * encoder is set to, so the same file at 4K would draw a 1080p-sized OSD in
+	 * one corner. `scale = auto' derives the factor from the canvas height
+	 * against PX_LAYOUT_REF_HEIGHT, so one file follows the stream resolution;
+	 * an explicit number overrides it.
+	 *
+	 * Applied at draw time rather than baked in at load, because `auto' cannot
+	 * know the canvas size until there is a canvas. */
+	float    scale;
+	int      scale_auto;
 } PxLayout;
+
+/* Layouts are authored against this height; `scale = auto' is canvas_h / this. */
+#define PX_LAYOUT_REF_HEIGHT 1080
 
 /* Parse `path`. Returns 0 on success, <0 if the file cannot be read.
  * Unknown keys and unknown widget types are reported on stderr and skipped, so
  * a bad layout degrades instead of taking the OSD down mid-flight. */
 int px_layout_load(PxLayout *l, const char *path);
 
-/* Draw every widget, in file order. */
+/* Draw every widget, in file order, with the layout's scale applied. */
 void px_layout_draw(const PxLayout *l, const PxCanvas *c, const PxTelemetry *t);
+
+/* The factor px_layout_draw would use for this canvas. Exposed so a caller can
+ * report what it rendered at. */
+float px_layout_scale_for(const PxLayout *l, const PxCanvas *c);
 
 #endif /* PX_LAYOUT_H */

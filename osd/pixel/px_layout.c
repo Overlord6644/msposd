@@ -111,7 +111,7 @@ static void widget_defaults(PxWidget *w)
 	w->fill = PX_TRANSPARENT;
 	w->min = 0.0f;
 	w->max = 100.0f;
-	w->scale = 8.0f;
+	w->pitch_scale = 8.0f;
 }
 
 int px_layout_load(PxLayout *l, const char *path)
@@ -122,6 +122,7 @@ int px_layout_load(PxLayout *l, const char *path)
 		return -1;
 	}
 	memset(l, 0, sizeof(*l));
+	l->scale = 1.0f;
 	snprintf(l->font, sizeof(l->font),
 		"/usr/share/fonts/truetype/UbuntuMono-Regular.ttf");
 
@@ -165,8 +166,28 @@ int px_layout_load(PxLayout *l, const char *path)
 		trim(val);
 
 		if (in_osd) {
-			if (!strcmp(key, "font"))
+			if (!strcmp(key, "font")) {
 				snprintf(l->font, sizeof(l->font), "%s", val);
+			} else if (!strcmp(key, "scale")) {
+				if (!strcmp(val, "auto")) {
+					l->scale_auto = 1;
+				} else {
+					float sc = strtof(val, NULL);
+					/* Refuse nonsense instead of rendering an
+					 * invisible or unbounded OSD. */
+					if (sc >= 0.1f && sc <= 8.0f) {
+						l->scale = sc;
+						l->scale_auto = 0;
+					} else {
+						fprintf(stderr, "[px_layout] scale %s out of"
+							" range (0.1..8), keeping %.2f\n",
+							val, l->scale);
+					}
+				}
+			} else {
+				fprintf(stderr, "[px_layout] [osd]: unknown key '%s'\n",
+					key);
+			}
 			continue;
 		}
 		if (!w)
@@ -193,7 +214,7 @@ int px_layout_load(PxLayout *l, const char *path)
 		else if (!strcmp(key, "fill"))         w->fill = parse_color(val, PX_TRANSPARENT);
 		else if (!strcmp(key, "min"))          w->min = strtof(val, NULL);
 		else if (!strcmp(key, "max"))          w->max = strtof(val, NULL);
-		else if (!strcmp(key, "scale"))        w->scale = strtof(val, NULL);
+		else if (!strcmp(key, "pitch_scale"))  w->pitch_scale = strtof(val, NULL);
 		else if (!strcmp(key, "source"))       snprintf(w->source, sizeof(w->source), "%s", val);
 		else if (!strcmp(key, "format"))       snprintf(w->format, sizeof(w->format), "%s", val);
 		else if (!strcmp(key, "label"))        snprintf(w->label, sizeof(w->label), "%s", val);
@@ -204,7 +225,12 @@ int px_layout_load(PxLayout *l, const char *path)
 				w->name, key);
 	}
 	fclose(f);
-	printf("[px_layout] %s: %d widget(s), font %s\n", path, l->count, l->font);
+	if (l->scale_auto)
+		printf("[px_layout] %s: %d widget(s), scale auto (ref %d px tall),"
+			" font %s\n", path, l->count, PX_LAYOUT_REF_HEIGHT, l->font);
+	else
+		printf("[px_layout] %s: %d widget(s), scale %.2f, font %s\n",
+			path, l->count, l->scale, l->font);
 	return 0;
 }
 
@@ -284,7 +310,7 @@ static void draw_horizon(const PxWidget *w, const PxCanvas *c,
 {
 	int half = (w->w > 0 ? w->w : 800) / 2;
 	float a = t->roll_deg * (float)M_PI / 180.0f;
-	int dy = (int)lrintf(t->pitch_deg * w->scale);
+	int dy = (int)lrintf(t->pitch_deg * w->pitch_scale);
 	int x0 = w->x - (int)lrintf(cosf(a) * (float)half);
 	int y0 = w->y + dy + (int)lrintf(sinf(a) * (float)half);
 	int x1 = w->x + (int)lrintf(cosf(a) * (float)half);
@@ -317,10 +343,44 @@ static void draw_arrow(const PxWidget *w, const PxCanvas *c,
 		px_triangle(c, ax, ay, bx, by, cx, cy, w->edge);
 }
 
+float px_layout_scale_for(const PxLayout *l, const PxCanvas *c)
+{
+	if (!l->scale_auto)
+		return l->scale;
+	if (!c || c->h <= 0)
+		return 1.0f;
+	return (float)c->h / (float)PX_LAYOUT_REF_HEIGHT;
+}
+
+/* Geometry only: min/max are data ranges, not lengths. pitch_scale is scaled
+ * too, so a given pitch angle keeps displacing the horizon by the same
+ * proportion of the frame rather than the same number of pixels. */
+static void scale_widget(PxWidget *w, float s)
+{
+	w->x = (int)lrintf((float)w->x * s);
+	w->y = (int)lrintf((float)w->y * s);
+	w->w = (int)lrintf((float)w->w * s);
+	w->h = (int)lrintf((float)w->h * s);
+	w->size = (int)lrintf((float)w->size * s);
+	w->thickness = (int)lrintf((float)w->thickness * s);
+	if (w->thickness < 1)
+		w->thickness = 1;
+	w->pitch_scale *= s;
+}
+
 void px_layout_draw(const PxLayout *l, const PxCanvas *c, const PxTelemetry *t)
 {
+	const float s = px_layout_scale_for(l, c);
 	for (int i = 0; i < l->count; i++) {
+		PxWidget scaled;
 		const PxWidget *w = &l->widgets[i];
+		/* Scale a copy so the layout keeps its authored numbers and the same
+		 * loaded layout can be drawn onto canvases of different sizes. */
+		if (s != 1.0f) {
+			scaled = *w;
+			scale_widget(&scaled, s);
+			w = &scaled;
+		}
 		switch (w->type) {
 		case PX_W_TEXT:    draw_text_widget(w, c, t); break;
 		case PX_W_BAR:     draw_bar(w, c, t);         break;
