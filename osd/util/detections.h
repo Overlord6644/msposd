@@ -11,7 +11,13 @@
 
 #include <stdint.h>
 
+/* Overridable so the host-side preview harness can point at a fixture. */
+#ifndef DET_FILE
 #define DET_FILE "/tmp/yolo.det"
+#endif
+#ifndef DET_TEST_FILE
+#define DET_TEST_FILE "/tmp/yolo.test"
+#endif
 #define DET_STALE_MS 1500
 #define DET_MAX 32
 

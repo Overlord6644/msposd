@@ -2,6 +2,7 @@
  * draws rectangle outlines into the I4 overlay canvas using the msposd
  * palette (index 2 = green, index 8 = black for the drop shadow). */
 #include "detections.h"
+#include "det_sidecar.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -111,16 +112,41 @@ static uint64_t now_ms(void) {
 	return (uint64_t)tv.tv_sec * 1000ull + tv.tv_usec / 1000ull;
 }
 
+/* Detections arrive either from waybeam venc's RTP sidecar (the documented
+ * channel, preferred) or from a file written by a standalone worker (the older
+ * arrangement, kept as a fallback so a camera running either stack works). */
+static int load_from_sidecar(det_t *out, int max) {
+	const DetSnapshot *s = det_sidecar_snapshot(DET_STALE_MS);
+	if (!s)
+		return 0;
+	int n = s->count < max ? s->count : max;
+	for (int i = 0; i < n; i++) {
+		out[i].x1 = s->boxes[i].x1;
+		out[i].y1 = s->boxes[i].y1;
+		out[i].x2 = s->boxes[i].x2;
+		out[i].y2 = s->boxes[i].y2;
+		out[i].pct = s->boxes[i].score_pct;
+		out[i].cls = s->boxes[i].cls;
+	}
+	return n;
+}
+
 static int load_dets(det_t *out, int max) {
 	/* Diagnostic: `touch /tmp/yolo.test` draws one fixed centre box, which
 	 * proves the msposd side of the pipeline independently of the worker. */
 	struct stat ts;
-	if (stat("/tmp/yolo.test", &ts) == 0 && max > 0) {
+	if (stat(DET_TEST_FILE, &ts) == 0 && max > 0) {
 		out[0].x1 = 0.25f; out[0].y1 = 0.25f;
 		out[0].x2 = 0.75f; out[0].y2 = 0.75f;
 		out[0].cls = 0; out[0].pct = 99;
 		return 1;
 	}
+	/* Poll first so a live stream always wins over a stale file. */
+	det_sidecar_poll();
+	int n_sc = load_from_sidecar(out, max);
+	if (n_sc > 0)
+		return n_sc;
+
 	FILE *f = fopen(DET_FILE, "r");
 	if (!f)
 		return 0;

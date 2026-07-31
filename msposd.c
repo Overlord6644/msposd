@@ -37,6 +37,7 @@
 
 #define MAX_MTU 9000
 #include "osd/util/settings.h"
+#include "osd/util/det_sidecar.h"
 
 // This needs to be patched in the kernel to work
 #define UART_FCR_TRIGGER_RX_L3 0x10000
@@ -46,6 +47,9 @@ bool armed = true; // assume armed until we are told otherwise from the fc
 bool AbortNow = false;
 bool verbose = false;
 bool ParseMSP = true;
+/* UDP port of waybeam venc's RTP sidecar, source of the AI detection boxes
+ * drawn by the OSD pass (0 = feature off). */
+int detect_sidecar_port = 0;
 bool DrawOSD = false;
 bool mspVTXenabled = false;
 bool vtxMenuEnabled = false;
@@ -110,6 +114,8 @@ static void print_usage() {
 		"	-x --matrix      OSD matrix (0: 53:20, 1: 50:18 chars)\n"
 		"	-z --size        Set OSD resolution\n"
 		"	-M --mavlink     Use mavlink protocol\n"
+		"	-D --detect-sidecar  UDP port of waybeam venc's sidecar for AI\n"
+		"	                 detection boxes (e.g. 5602); 0 = off\n"
 		"	   --mspvtx      Enable mspvtx support\n"
 		"      --subtitle <path>  Enable OSD/SRT recording\n"
 		"	-v --verbose     Show debug info\n"
@@ -1440,6 +1446,10 @@ int main(int argc, char **argv) {
 		{"mspvtx", no_argument, NULL, '1'},
 		{"subtitle", required_argument, NULL, 's'},
 		{"mavlink", required_argument, NULL, 'M'},
+		/* AI detection boxes from waybeam venc's RTP sidecar; drawn into the
+		 * same region as the OSD because this platform cannot composite two
+		 * overlapping regions. 0 disables. */
+		{"detect-sidecar", required_argument, NULL, 'D'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
@@ -1458,7 +1468,7 @@ int main(int argc, char **argv) {
 
 	printf("Version: %s, compiled at: %s\n", GIT_VERSION, VERSION_STRING);
 
-	while ((opt = getopt_long_only(argc, argv, "m:b:o:c:w:r:p:tjf:da:x:z:1vMh",
+	while ((opt = getopt_long_only(argc, argv, "m:b:o:c:w:r:p:tjf:da:x:z:1vMhD:",
 			long_options, &long_index)) != -1) {
 		switch (opt) {
 		case 'm':
@@ -1572,6 +1582,12 @@ int main(int argc, char **argv) {
 			printf("Mavlink mode\n");
 			break;
 
+		case 'D':
+			/* waybeam venc sidecar port; detections are drawn into the OSD's
+			 * region because the SoC cannot composite two of them. */
+			detect_sidecar_port = atoi(optarg);
+			break;
+
 		case 'h':
 		default:
 			print_usage();
@@ -1580,6 +1596,10 @@ int main(int argc, char **argv) {
 	}
 
 	strcpy(_port_name, port_name);
+	if (detect_sidecar_port > 0 &&
+		det_sidecar_open("127.0.0.1", detect_sidecar_port) != 0)
+		fprintf(stderr, "[det-sidecar] cannot subscribe on port %d\n",
+			detect_sidecar_port);
 	if (ParseMSP) {
 		// msp_process_data(rx_msp_state, serial_data[i]);
 		rx_msp_state = calloc(1, sizeof(msp_state_t));
