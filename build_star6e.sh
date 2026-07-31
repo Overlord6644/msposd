@@ -31,8 +31,14 @@ make -s clean >/dev/null 2>&1 || true
 # TARGET_CC wrapper does. Passing CFLAGS= on the command line would override the
 # -D__SIGMASTAR__ defines that the star6e target appends, silently building the
 # Goke variant instead.
+# -ffunction-sections/-fdata-sections with --gc-sections drops code nothing
+# calls. That matters here: the camera's overlay filesystem has well under a
+# megabyte free, and this binary links a PNG codec, a TrueType rasteriser and a
+# pile of pixel-format converters of which it uses a fraction.
 make star6e \
-    CC="$CC -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -L$STAGING/usr/lib" \
+    CC="$CC -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
+        -ffunction-sections -fdata-sections -Wl,--gc-sections \
+        -L$STAGING/usr/lib" \
     TOOLCHAIN="$STAGING" \
     DRV="$DRV" \
     OUTPUT=/tmp/msposd_fusion
