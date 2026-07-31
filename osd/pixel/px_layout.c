@@ -1,5 +1,6 @@
 /* px_layout.c - see px_layout.h. */
 #include "px_layout.h"
+#include "px_hud.h"
 #include "px_text.h"
 
 #include <math.h>
@@ -30,6 +31,20 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		{"home_bearing",t->home_bearing_deg},
 		{"rssi",        (float)t->rssi_pct},
 		{"lq",          (float)t->lq_pct},
+		/* From the air unit's link daemon - see px_datalink.h. */
+		{"dl_lq",       (float)t->dl.lq_pct},
+		{"dl_mcs",      (float)t->dl.mcs},
+		{"dl_bitrate",  (float)t->dl.bitrate_kbps},
+		{"dl_mbps",     t->dl.throughput_mb},
+		{"dl_fps",      (float)t->dl.fps},
+		{"dl_cpu",      (float)t->dl.cpu_pct},
+		{"dl_soc_temp", (float)t->dl.soc_temp_c},
+		{"dl_tx_temp",  (float)t->dl.tx_temp_c},
+		{"dl_uplink",   (float)t->dl.uplink_pct},
+		{"dl_pw",       (float)t->dl.tx_power},
+		{"dl_ch",       (float)t->dl.channel},
+		{"dl_bw",       (float)t->dl.bandwidth_mhz},
+		{"dl_q",        (float)t->dl.pubq},
 		{"armed",       (float)t->armed},
 	};
 	for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
@@ -85,6 +100,10 @@ static PxWidgetType parse_type(const char *s)
 	if (!strcmp(s, "horizon")) return PX_W_HORIZON;
 	if (!strcmp(s, "arrow"))   return PX_W_ARROW;
 	if (!strcmp(s, "rect"))    return PX_W_RECT;
+	if (!strcmp(s, "compass"))   return PX_W_COMPASS;
+	if (!strcmp(s, "tape"))      return PX_W_TAPE;
+	if (!strcmp(s, "ladder"))    return PX_W_LADDER;
+	if (!strcmp(s, "crosshair")) return PX_W_CROSSHAIR;
 	return PX_W_NONE;
 }
 
@@ -112,6 +131,11 @@ static void widget_defaults(PxWidget *w)
 	w->min = 0.0f;
 	w->max = 100.0f;
 	w->pitch_scale = 8.0f;
+	w->span = 0.0f;   /* 0 = each instrument's own sensible default */
+	w->step = 0.0f;
+	w->accent = PX_YELLOW;
+	w->z = 0;
+	w->layer = 0;
 }
 
 int px_layout_load(PxLayout *l, const char *path)
@@ -123,6 +147,9 @@ int px_layout_load(PxLayout *l, const char *path)
 	}
 	memset(l, 0, sizeof(*l));
 	l->scale = 1.0f;
+	/* Layer 0 only, so a layout that never mentions layers behaves
+	 * exactly as it did before this existed. */
+	l->layer_mask = 0x01;
 	snprintf(l->font, sizeof(l->font),
 		"/usr/share/fonts/truetype/UbuntuMono-Regular.ttf");
 
@@ -184,6 +211,24 @@ int px_layout_load(PxLayout *l, const char *path)
 							val, l->scale);
 					}
 				}
+			} else if (!strcmp(key, "layers")) {
+				/* Which layers are visible at boot, e.g. "0" or "0,2". */
+				unsigned m = 0;
+				for (const char *p = val; *p; p++)
+					if (*p >= '0' && *p <= '7')
+						m |= 1u << (*p - '0');
+				if (m)
+					l->layer_mask = m;
+				else
+					fprintf(stderr, "[px_layout] layers '%s' names none,"
+						" keeping 0x%02x\n", val, l->layer_mask);
+			} else if (!strcmp(key, "layer_channel")) {
+				int ch = atoi(val);
+				if (ch >= 0 && ch <= 16)
+					l->layer_channel = ch;
+				else
+					fprintf(stderr, "[px_layout] layer_channel %s out of"
+						" range (0..16)\n", val);
 			} else {
 				fprintf(stderr, "[px_layout] [osd]: unknown key '%s'\n",
 					key);
@@ -215,6 +260,18 @@ int px_layout_load(PxLayout *l, const char *path)
 		else if (!strcmp(key, "min"))          w->min = strtof(val, NULL);
 		else if (!strcmp(key, "max"))          w->max = strtof(val, NULL);
 		else if (!strcmp(key, "pitch_scale"))  w->pitch_scale = strtof(val, NULL);
+	else if (!strcmp(key, "span"))         w->span = strtof(val, NULL);
+	else if (!strcmp(key, "step"))         w->step = strtof(val, NULL);
+	else if (!strcmp(key, "accent"))       w->accent = parse_color(val, PX_YELLOW);
+	else if (!strcmp(key, "z"))            w->z = atoi(val);
+	else if (!strcmp(key, "layer")) {
+		int ly = atoi(val);
+		if (ly >= 0 && ly <= 7)
+			w->layer = ly;
+		else
+			fprintf(stderr, "[px_layout] '%s': layer %s out of range"
+				" (0..7)\n", w->name, val);
+	}
 		else if (!strcmp(key, "source"))       snprintf(w->source, sizeof(w->source), "%s", val);
 		else if (!strcmp(key, "format"))       snprintf(w->format, sizeof(w->format), "%s", val);
 		else if (!strcmp(key, "label"))        snprintf(w->label, sizeof(w->label), "%s", val);
@@ -355,6 +412,39 @@ static void arrow_pts(const PxWidget *w, const PxTelemetry *t, int *p)
 	p[5] = w->y - (int)lrintf(cosf(a - 2.5f) * (float)r * 0.6f);
 }
 
+static void draw_compass(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	float v = t->yaw_deg;
+	if (*w->source)
+		px_telemetry_value(t, w->source, &v);
+	px_hud_compass(c, w->x, w->y, w->w > 0 ? w->w : 520, v,
+		w->span > 0.0f ? w->span : 90.0f,
+		w->step > 0.0f ? w->step : 15.0f,
+		w->size > 0 ? w->size : 22, w->color, w->accent, w->edge);
+}
+
+static void draw_tape(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	float v = 0.0f;
+	px_telemetry_value(t, w->source, &v);
+	px_hud_tape(c, w->x, w->y, w->h > 0 ? w->h : 300, v,
+		w->span > 0.0f ? w->span : 40.0f,
+		w->step > 0.0f ? w->step : 5.0f,
+		w->align, w->size > 0 ? w->size : 20, w->color, w->accent, w->edge);
+}
+
+static void draw_ladder(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	px_hud_ladder(c, w->x, w->y, w->w > 0 ? w->w : 420,
+		w->h > 0 ? w->h : 340, t->roll_deg,
+		t->pitch_deg, w->pitch_scale > 0.0f ? w->pitch_scale : 8.0f,
+		w->step > 0.0f ? w->step : 10.0f,
+		w->size > 0 ? w->size : 20, w->color, w->accent, w->edge);
+}
+
 static void draw_arrow(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
 {
@@ -402,6 +492,13 @@ static void draw_widget(const PxWidget *w, const PxCanvas *c,
 	case PX_W_GAUGE:   draw_gauge(w, c, t);       break;
 	case PX_W_HORIZON: draw_horizon(w, c, t);     break;
 	case PX_W_ARROW:   draw_arrow(w, c, t);       break;
+	case PX_W_COMPASS: draw_compass(w, c, t);     break;
+	case PX_W_TAPE:    draw_tape(w, c, t);        break;
+	case PX_W_LADDER:  draw_ladder(w, c, t);      break;
+	case PX_W_CROSSHAIR:
+		px_hud_crosshair(c, w->x, w->y, w->size > 0 ? w->size : 28,
+			w->color, w->edge);
+		break;
 	case PX_W_RECT:
 		if (w->fill != PX_TRANSPARENT)
 			px_fill_rect(c, w->x, w->y, w->x + w->w,
@@ -412,6 +509,47 @@ static void draw_widget(const PxWidget *w, const PxCanvas *c,
 		break;
 	default:
 		break;
+	}
+}
+
+/* Union of two dirty boxes, so a frame can clear one region instead of many. */
+static void region_add(PxDirty *r, const PxDirty *b)
+{
+	if (b->x1 < b->x0)
+		return; /* empty */
+	if (r->x1 < r->x0) {
+		*r = *b;
+		return;
+	}
+	if (b->x0 < r->x0) r->x0 = b->x0;
+	if (b->y0 < r->y0) r->y0 = b->y0;
+	if (b->x1 > r->x1) r->x1 = b->x1;
+	if (b->y1 > r->y1) r->y1 = b->y1;
+}
+
+static int box_overlaps(const PxDirty *b, int x0, int y0, int x1, int y1)
+{
+	if (b->x1 < b->x0)
+		return 0;
+	return !(b->x1 < x0 || b->x0 > x1 || b->y1 < y0 || b->y0 > y1);
+}
+
+/* Draw order: by depth, stable, so widgets at the same z keep file order. Both
+ * paths use this, because they must agree about what is in front of what. */
+static void draw_order(const PxLayout *l, int *idx)
+{
+	int n = 0;
+	for (int i = 0; i < l->count; i++)
+		idx[n++] = i;
+	/* Insertion sort: n is at most PX_LAYOUT_MAX_WIDGETS and stability is the
+	 * property we need, not speed. */
+	for (int i = 1; i < n; i++) {
+		int cur = idx[i], j = i - 1;
+		while (j >= 0 && l->widgets[idx[j]].z > l->widgets[cur].z) {
+			idx[j + 1] = idx[j];
+			j--;
+		}
+		idx[j + 1] = cur;
 	}
 }
 
@@ -430,7 +568,12 @@ static const PxWidget *widget_scaled(const PxLayout *l, int i, float s,
 void px_layout_draw(const PxLayout *l, const PxCanvas *c, const PxTelemetry *t)
 {
 	const float s = px_layout_scale_for(l, c);
-	for (int i = 0; i < l->count; i++) {
+	int order[PX_LAYOUT_MAX_WIDGETS];
+	draw_order(l, order);
+	for (int k = 0; k < l->count; k++) {
+		int i = order[k];
+		if (!(l->layer_mask & (1u << l->widgets[i].layer)))
+			continue;
 		PxWidget tmp;
 		draw_widget(widget_scaled(l, i, s, &tmp), c, t);
 	}
@@ -516,6 +659,28 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		arrow_pts(w, t, p);
 		return fnv1a(h, p, sizeof(p));
 	}
+	case PX_W_COMPASS: {
+		float v = t->yaw_deg;
+		if (*w->source)
+			px_telemetry_value(t, w->source, &v);
+		float span = w->span > 0.0f ? w->span : 90.0f;
+		int q = (int)lrintf(v * ((float)(w->w > 0 ? w->w : 520) / span));
+		return fnv1a(h, &q, sizeof(q)); /* pixels of ribbon travel */
+	}
+	case PX_W_TAPE: {
+		float v = 0.0f;
+		px_telemetry_value(t, w->source, &v);
+		float span = w->span > 0.0f ? w->span : 40.0f;
+		int q = (int)lrintf(v * ((float)(w->h > 0 ? w->h : 300) / span));
+		return fnv1a(h, &q, sizeof(q)); /* pixels of tape travel */
+	}
+	case PX_W_LADDER: {
+		float pd = w->pitch_scale > 0.0f ? w->pitch_scale : 8.0f;
+		int qr = (int)lrintf(t->roll_deg * 8.0f);      /* eighth of a degree */
+		int qp = (int)lrintf(t->pitch_deg * pd);       /* whole pixels */
+		h = fnv1a(h, &qr, sizeof(qr));
+		return fnv1a(h, &qp, sizeof(qp));
+	}
 	default:
 		return h; /* static: signature never changes, drawn once */
 	}
@@ -525,30 +690,105 @@ int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
 	const PxTelemetry *t, PxLayoutCache *cache)
 {
 	const float s = px_layout_scale_for(l, c);
+	int order[PX_LAYOUT_MAX_WIDGETS];
+	draw_order(l, order);
+
+	PxWidget scaled[PX_LAYOUT_MAX_WIDGETS];
+	uint32_t sig[PX_LAYOUT_MAX_WIDGETS];
+	int visible[PX_LAYOUT_MAX_WIDGETS];
+	int changed[PX_LAYOUT_MAX_WIDGETS];
+
+	/* Pass 1: what would each widget draw, and has that changed? */
+	PxDirty region;
+	px_dirty_reset(&region);
+	int any = 0;
+	for (int i = 0; i < l->count; i++) {
+		visible[i] = (l->layer_mask & (1u << l->widgets[i].layer)) != 0;
+		changed[i] = 0;
+		if (!visible[i]) {
+			/* Just hidden: its pixels have to go. */
+			if (cache->sig[i] != 0 || cache->box[i].x1 >= cache->box[i].x0) {
+				region_add(&region, &cache->box[i]);
+				cache->sig[i] = 0;
+				px_dirty_reset(&cache->box[i]);
+				any = 1;
+			}
+			continue;
+		}
+		scaled[i] = l->widgets[i];
+		if (s != 1.0f)
+			scale_widget(&scaled[i], s);
+		sig[i] = widget_sig(&scaled[i], t);
+		if (!cache->primed || sig[i] != cache->sig[i]) {
+			changed[i] = 1;
+			any = 1;
+			/* Where it was: that area must be cleared whether or not the widget
+			 * lands in the same place this time. */
+			region_add(&region, &cache->box[i]);
+		}
+	}
+	if (!any) {
+		cache->primed = 1;
+		return 0;
+	}
+
+	/* Clear once, over the union. Per-widget clears cannot work when widgets
+	 * overlap: erasing the box of something behind would take a bite out of
+	 * whatever is drawn on top of it, and that widget - unchanged - would never
+	 * be redrawn to repair it. */
+	int rx0, ry0, rx1, ry1;
+	if (px_dirty_box(&region, &rx0, &ry0, &rx1, &ry1))
+		px_clear_rect(c, rx0, ry0, rx1, ry1);
+
+	/* Pass 2: redraw, in depth order, everything that changed or that the clear
+	 * touched. Depth order matters: repairing an overlap only comes out right if
+	 * the widget in front is drawn after the one behind. */
 	PxDirty track;
 	PxCanvas tc = *c;
 	tc.dirty = &track;
 	int redrawn = 0;
-
-	for (int i = 0; i < l->count; i++) {
-		PxWidget tmp;
-		const PxWidget *w = widget_scaled(l, i, s, &tmp);
-		uint32_t sig = widget_sig(w, t);
-
-		if (cache->primed && sig == cache->sig[i])
-			continue; /* identical pixels; leave them on the canvas */
-
-		/* Erase where it was, then draw where it goes, recording that. */
-		int x0, y0, x1, y1;
-		if (px_dirty_box(&cache->box[i], &x0, &y0, &x1, &y1))
-			px_clear_rect(c, x0, y0, x1, y1);
-
+	for (int k = 0; k < l->count; k++) {
+		int i = order[k];
+		if (!visible[i])
+			continue;
+		int touched = changed[i] ||
+			(px_dirty_box(&region, &rx0, &ry0, &rx1, &ry1) &&
+			 box_overlaps(&cache->box[i], rx0, ry0, rx1, ry1));
+		if (!touched)
+			continue;
 		px_dirty_reset(&track);
-		draw_widget(w, &tc, t);
+		draw_widget(&scaled[i], &tc, t);
 		cache->box[i] = track;
-		cache->sig[i] = sig;
+		cache->sig[i] = sig[i];
 		redrawn++;
 	}
 	cache->primed = 1;
 	return redrawn;
+}
+
+void px_layout_set_layers(PxLayout *l, unsigned mask)
+{
+	if (!l || !mask)
+		return; /* refusing 0: blanking the OSD is never the intent */
+	l->layer_mask = mask;
+}
+
+int px_layout_apply_rc(PxLayout *l, int channel_us)
+{
+	if (!l || l->layer_channel <= 0)
+		return 0;
+	/* Three-position switch. Thresholds sit well inside each band so a jittering
+	 * channel cannot flap between layers. */
+	unsigned want;
+	if (channel_us < 1300)
+		want = 0x01;
+	else if (channel_us < 1700)
+		want = 0x02;
+	else
+		want = 0x04;
+	if (want == l->layer_mask)
+		return 0;
+	l->layer_mask = want;
+	printf("[px_layout] layers -> 0x%02x (channel %d us)\n", want, channel_us);
+	return 1;
 }

@@ -15,6 +15,8 @@
 
 #include <stdint.h>
 
+#include "px_datalink.h"
+
 typedef struct {
 	/* Attitude, degrees. Roll positive right, pitch positive nose-up. */
 	float roll_deg;
@@ -38,9 +40,12 @@ typedef struct {
 	float home_dist_m;
 	float home_bearing_deg; /* relative to nose, 0 = ahead */
 
-	/* Link */
+	/* Link. rssi/lq come from the flight controller; `dl' comes from the
+	 * air unit's own adaptive-link daemon, which knows things the FC cannot
+	 * (modulation index, air throughput, radio temperature). */
 	int   rssi_pct;
 	int   lq_pct;
+	PxDatalink dl;
 
 	/* Status */
 	int  armed;

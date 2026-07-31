@@ -58,6 +58,7 @@
 #include "osd.h"
 #include "osd/util/subtitle.h"
 #include "osd/pixel/px_layout.h"
+#include "osd/pixel/px_datalink.h"
 
 #define CPU_TEMP_PATH "/sys/devices/platform/soc/f0a00000.apb/f0a71000.omc/temp1"
 #define AU_VOLTAGE_PATH "/sys/devices/platform/soc/f0a00000.apb/f0a71000.omc/voltage4"
@@ -2212,6 +2213,14 @@ static void px_osd_fill(PxTelemetry *t)
 	snprintf(t->mode, sizeof(t->mode), "%s", current_fc_identifier);
 	if (strlen(air_unit_info_msg) > 1)
 		snprintf(t->msg, sizeof(t->msg), "%s", air_unit_info_msg);
+	/* The air unit's link daemon has no API - it publishes one formatted line,
+	 * which the character OSD printed verbatim. Parse it so the figures can be
+	 * placed and coloured individually. Kept across frames, so a line that
+	 * omits a field does not blank the widget showing it. */
+	static PxDatalink dl;
+	px_datalink_parse(&dl, air_unit_info_msg);
+	px_datalink_parse(&dl, osdmsg);   /* /tmp/MSPOSD.msg, the same source */
+	t->dl = dl;
 	t->valid = 1;
 }
 
@@ -2227,6 +2236,16 @@ static void px_osd_draw(void)
 		getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
 	PxTelemetry t;
 	px_osd_fill(&t);
+	/* An RC switch selects which layer set is shown. A change invalidates the
+	 * cache: widgets from the layer we are leaving have to be erased, not left
+	 * sitting on the canvas. */
+	if (g_px_layout.layer_channel > 0) {
+		int ch = g_px_layout.layer_channel - 1;
+		if (ch >= 0 && ch < 16 &&
+			px_layout_apply_rc(&g_px_layout, channels[ch]) && g_px_cache)
+			px_layout_cache_reset(g_px_cache);
+	}
+
 	if (g_px_cache) {
 		/* Same call either way: on a freshly cleared buffer the cache was just
 		 * reset, so every widget is redrawn and recorded, and the next frame on

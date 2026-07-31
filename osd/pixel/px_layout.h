@@ -48,6 +48,12 @@ typedef enum {
 	PX_W_HORIZON, /* artificial horizon at the real roll/pitch */
 	PX_W_ARROW,   /* bearing pointer (rotated triangle) */
 	PX_W_RECT,    /* static frame or backdrop */
+	/* Instrument widgets: what a HUD is made of, and what a character grid
+	 * cannot draw - see px_hud.h. */
+	PX_W_COMPASS,   /* scrolling heading ribbon with cardinal letters */
+	PX_W_TAPE,      /* vertical speed/altitude ladder with a value box */
+	PX_W_LADDER,    /* pitch ladder rotated to the current roll */
+	PX_W_CROSSHAIR, /* fixed aircraft reference */
 } PxWidgetType;
 
 typedef struct {
@@ -61,7 +67,22 @@ typedef struct {
 	char format[PX_LAYOUT_STR];
 	char label[PX_LAYOUT_STR];
 	float min, max;    /* value range for bar/gauge */
-	float pitch_scale; /* horizon: pixels per degree of pitch */
+	float pitch_scale; /* horizon and ladder: pixels per degree of pitch */
+	/* Instruments show a moving window rather than a fixed range: `span` is how
+	 * much of the scale is visible (degrees for a compass, units for a tape) and
+	 * `step` is the tick interval. */
+	float span;
+	float step;
+	uint8_t accent;    /* highlight: value box, pointer, north, horizon bar */
+	/* Draw depth. Lower is further back; equal depths keep file order. This is
+	 * what puts the artificial horizon behind everything and the readouts in
+	 * front of it, without having to reorder the file. */
+	int z;
+	/* Which visibility set this widget belongs to, 0..7 - a different idea from
+	 * `z`. A layout can hold several sets (a minimal one for racing, a full one
+	 * for cruising) and show whichever the pilot selects, instead of needing
+	 * separate files and a restart. */
+	int layer;
 	int  align;      /* 0 left, 1 centre, 2 right */
 } PxWidget;
 
@@ -82,6 +103,12 @@ typedef struct {
 	 * know the canvas size until there is a canvas. */
 	float    scale;
 	int      scale_auto;
+	/* Bitmask of visible layers; bit N is layer N. Default 0x01, so a layout
+	 * that never mentions layers behaves exactly as before. */
+	unsigned layer_mask;
+	/* RC channel (1..16) whose stick position picks the layer, 0 = off. Three
+	 * positions map to layers 0/1/2, which is what a three-way switch gives. */
+	int      layer_channel;
 } PxLayout;
 
 /* Layouts are authored against this height; `scale = auto' is canvas_h / this. */
@@ -92,8 +119,19 @@ typedef struct {
  * a bad layout degrades instead of taking the OSD down mid-flight. */
 int px_layout_load(PxLayout *l, const char *path);
 
-/* Draw every widget, in file order, with the layout's scale applied. */
+/* Draw every widget, in file order, with the layout's scale applied. Widgets
+ * whose layer is not in `layer_mask` are skipped. */
 void px_layout_draw(const PxLayout *l, const PxCanvas *c, const PxTelemetry *t);
+
+/* Show exactly the layers in `mask` (bit N = layer N). A mask of 0 is ignored
+ * rather than blanking the OSD, which is never what anyone wants mid-flight. */
+void px_layout_set_layers(PxLayout *l, unsigned mask);
+
+/* Map a raw RC channel value (microseconds, ~1000..2000) to a layer mask and
+ * apply it. Returns 1 if the visible set changed, so a caller can invalidate a
+ * dirty-rect cache - stale widgets from the previous layer would otherwise stay
+ * on screen. Does nothing when layer_channel is 0. */
+int px_layout_apply_rc(PxLayout *l, int channel_us);
 
 /* The factor px_layout_draw would use for this canvas. Exposed so a caller can
  * report what it rendered at. */
