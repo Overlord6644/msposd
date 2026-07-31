@@ -14,6 +14,7 @@
 #define MSP_ATTITUDE 108
 #define MSP_RC 105
 #define MSP_ALTITUDE             109    //out message         altitude, variometer
+#define MSP_ANALOG               110    //out message         vbat, powermeter, rssi, amperage
 
 #define MSP_CMD_ANALOG 110
 #define MSP_CMD_RC_TUNING 111

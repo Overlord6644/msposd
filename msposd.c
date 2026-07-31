@@ -50,6 +50,8 @@ bool ParseMSP = true;
 /* UDP port of waybeam venc's RTP sidecar, source of the AI detection boxes
  * drawn by the OSD pass (0 = feature off). */
 int detect_sidecar_port = 0;
+/* Path to the pixel OSD layout, NULL = feature off. */
+const char *pixel_layout_path = NULL;
 bool DrawOSD = false;
 bool mspVTXenabled = false;
 bool vtxMenuEnabled = false;
@@ -116,6 +118,8 @@ static void print_usage() {
 		"	-M --mavlink     Use mavlink protocol\n"
 		"	-D --detect-sidecar  UDP port of waybeam venc's sidecar for AI\n"
 		"	                 detection boxes (e.g. 5602); 0 = off\n"
+		"	-P --pixel-layout    Pixel OSD layout file: widgets positioned in\n"
+		"	                 pixels and drawn from telemetry values\n"
 		"	   --mspvtx      Enable mspvtx support\n"
 		"      --subtitle <path>  Enable OSD/SRT recording\n"
 		"	-v --verbose     Show debug info\n"
@@ -1135,7 +1139,9 @@ static void send_variant_request2(int serial_fd) {
 		res = write(serial_fd, buffer, cmdlen);
 	}
 	
-	if (AHI_Enabled) {
+	/* The pixel OSD reads the same telemetry the AHI does, so polling must
+	 * run for it too - not only when the graphic horizon is enabled. */
+	if (AHI_Enabled || px_osd_active()) {
 		if (AHI_Enabled >= 3 && (VariantCounter == 4 || VariantCounter == 14 )) {//twice per second home vector
 			construct_msp_command(buffer, MSP_COMP_GPS, NULL, 0, MSP_OUTBOUND);
 			res = write(serial_fd, buffer, cmdlen);			 
@@ -1161,6 +1167,17 @@ static void send_variant_request2(int serial_fd) {
 			res = write(serial_fd, buffer, cmdlen);
 			last_MSP_ATTITUDE = get_time_ms();
 		}		
+
+		/* Battery and RSSI change slowly; twice a second is plenty and keeps
+		 * the serial link free for attitude, which drives the horizon. */
+		if (VariantCounter == 6 || VariantCounter == 16) {
+			construct_msp_command(buffer, MSP_CMD_BATTERY_STATE, NULL, 0, MSP_OUTBOUND);
+			res = write(serial_fd, buffer, cmdlen);
+		}
+		if (VariantCounter == 7 || VariantCounter == 17) {
+			construct_msp_command(buffer, MSP_ANALOG, NULL, 0, MSP_OUTBOUND);
+			res = write(serial_fd, buffer, cmdlen);
+		}
 	}
 		
 	VariantCounter++;
@@ -1450,6 +1467,9 @@ int main(int argc, char **argv) {
 		 * same region as the OSD because this platform cannot composite two
 		 * overlapping regions. 0 disables. */
 		{"detect-sidecar", required_argument, NULL, 'D'},
+		/* Pixel OSD: widgets positioned in pixels from a layout file, drawn
+		 * from telemetry values instead of the FC's character grid. */
+		{"pixel-layout", required_argument, NULL, 'P'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
@@ -1468,7 +1488,7 @@ int main(int argc, char **argv) {
 
 	printf("Version: %s, compiled at: %s\n", GIT_VERSION, VERSION_STRING);
 
-	while ((opt = getopt_long_only(argc, argv, "m:b:o:c:w:r:p:tjf:da:x:z:1vMhD:",
+	while ((opt = getopt_long_only(argc, argv, "m:b:o:c:w:r:p:tjf:da:x:z:1vMhD:P:",
 			long_options, &long_index)) != -1) {
 		switch (opt) {
 		case 'm':
@@ -1588,6 +1608,10 @@ int main(int argc, char **argv) {
 			detect_sidecar_port = atoi(optarg);
 			break;
 
+		case 'P':
+			pixel_layout_path = optarg;
+			break;
+
 		case 'h':
 		default:
 			print_usage();
@@ -1596,6 +1620,9 @@ int main(int argc, char **argv) {
 	}
 
 	strcpy(_port_name, port_name);
+	if (pixel_layout_path)
+		px_osd_load_layout(pixel_layout_path);
+
 	if (detect_sidecar_port > 0 &&
 		det_sidecar_open("127.0.0.1", detect_sidecar_port) != 0)
 		fprintf(stderr, "[det-sidecar] cannot subscribe on port %d\n",

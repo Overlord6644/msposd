@@ -57,6 +57,7 @@
 
 #include "osd.h"
 #include "osd/util/subtitle.h"
+#include "osd/pixel/px_layout.h"
 
 #define CPU_TEMP_PATH "/sys/devices/platform/soc/f0a00000.apb/f0a71000.omc/temp1"
 #define AU_VOLTAGE_PATH "/sys/devices/platform/soc/f0a00000.apb/f0a71000.omc/voltage4"
@@ -142,6 +143,15 @@ static int16_t last_groundCourse = 0;
 static int16_t last_altitude = 0;
 static int16_t last_speed = 0;
 static int16_t last_vario = 0; //cm/s
+
+/* Battery and link, from MSP_CMD_BATTERY_STATE and MSP_ANALOG. The pixel OSD
+ * needs values rather than the character cells DisplayPort would hand us. */
+static uint16_t last_vbat_cv = 0;     /* centivolts */
+static int16_t  last_amperage_ca = 0; /* centiamps, signed */
+static uint16_t last_mah_used = 0;
+static uint8_t  last_batt_cells = 0;
+static uint16_t last_batt_capacity = 0;
+static int      last_rssi_pct = -1;   /* -1 = never received */
 
 static msp_state_t *msp_state;
 
@@ -539,6 +549,35 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	}
 	case MSP_ALTITUDE: {
 		last_vario = *(int16_t *)&msp_message->payload[4];
+		break;
+	}
+
+	/* Betaflight MSP_BATTERY_STATE: cells u8, capacity u16, legacy voltage u8
+	 * (0.1V), mAh drawn u16, amperage i16 (0.01A), state u8, then voltage u16
+	 * in 0.01V - the last field is the one worth reading, the legacy byte
+	 * saturates at 25.5V. */
+	case MSP_CMD_BATTERY_STATE: {
+		last_batt_cells = msp_message->payload[0];
+		last_batt_capacity = *(uint16_t *)&msp_message->payload[1];
+		last_mah_used = *(uint16_t *)&msp_message->payload[4];
+		last_amperage_ca = *(int16_t *)&msp_message->payload[6];
+		if (msp_message->size >= 11)
+			last_vbat_cv = *(uint16_t *)&msp_message->payload[9];
+		else /* older API: fall back to the 0.1V byte */
+			last_vbat_cv = (uint16_t)(msp_message->payload[3] * 10);
+		break;
+	}
+
+	/* MSP_ANALOG: legacy voltage u8, mAh u16, rssi u16 (0..1023),
+	 * amperage i16, voltage u16 (0.01V) on API >= 1.41. Polled mainly for
+	 * RSSI, which BATTERY_STATE does not carry. */
+	case MSP_ANALOG: {
+		uint16_t rssi_raw = *(uint16_t *)&msp_message->payload[3];
+		last_rssi_pct = (int)((rssi_raw * 100 + 511) / 1023);
+		if (last_rssi_pct > 100)
+			last_rssi_pct = 100;
+		if (msp_message->size >= 9 && last_vbat_cv == 0)
+			last_vbat_cv = *(uint16_t *)&msp_message->payload[7];
 		break;
 	}
 
@@ -2068,6 +2107,73 @@ static bool ReplaceWidgets_Slow(int *x, int *y) {
 }
 
 
+/* ---- pixel OSD bridge ----
+ * The layout and the widgets only ever read PxTelemetry, so this is the single
+ * place that knows MSP field encodings. Scaling lives here: MSP sends attitude
+ * in decidegrees, speed in cm/s, voltage in centivolts. */
+
+static PxLayout g_px_layout;
+static int g_px_layout_loaded;
+
+int px_osd_load_layout(const char *path)
+{
+	if (px_layout_load(&g_px_layout, path) != 0)
+		return -1;
+	if (px_font_load(g_px_layout.font) != 0) {
+		fprintf(stderr, "[px_osd] layout loaded but font %s is missing;"
+			" text widgets will not draw\n", g_px_layout.font);
+	}
+	g_px_layout_loaded = 1;
+	return 0;
+}
+
+int px_osd_active(void)
+{
+	return g_px_layout_loaded;
+}
+
+static void px_osd_fill(PxTelemetry *t)
+{
+	memset(t, 0, sizeof(*t));
+	t->roll_deg = (float)last_roll / 10.0f;    /* decidegrees */
+	t->pitch_deg = (float)last_pitch / 10.0f;
+	t->yaw_deg = (float)last_heading;
+	t->volt_v = (float)last_vbat_cv / 100.0f;  /* centivolts */
+	t->curr_a = (float)last_amperage_ca / 100.0f;
+	t->mah_used = last_mah_used;
+	if (last_batt_capacity > 0) {
+		int pct = 100 - (int)((long)last_mah_used * 100 / last_batt_capacity);
+		t->batt_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+	}
+	t->alt_m = (float)last_altitude;
+	t->spd_kph = (float)last_speed * 0.036f;   /* cm/s -> km/h */
+	t->vspd_ms = (float)last_vario / 100.0f;   /* cm/s -> m/s */
+	t->sats = 0;
+	t->home_dist_m = (float)last_distanceToHome;
+	t->home_bearing_deg = (float)last_directionToHome;
+	t->rssi_pct = last_rssi_pct < 0 ? 0 : last_rssi_pct;
+	t->lq_pct = 0;
+	snprintf(t->mode, sizeof(t->mode), "%s", current_fc_identifier);
+	if (strlen(air_unit_info_msg) > 1)
+		snprintf(t->msg, sizeof(t->msg), "%s", air_unit_info_msg);
+	t->valid = 1;
+}
+
+static void px_osd_draw(void)
+{
+	if (!g_px_layout_loaded || bmpBuff.pData == NULL)
+		return;
+	if (PIXEL_FORMAT_DEFAULT != PIXEL_FORMAT_I4)
+		return; /* the pixel layer writes I4 nibbles directly */
+	PxCanvas c;
+	px_canvas_init(&c, bmpBuff.pData, (int)bmpBuff.u32Width,
+		(int)bmpBuff.u32Height,
+		getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
+	PxTelemetry t;
+	px_osd_fill(&t);
+	px_layout_draw(&g_px_layout, &c, &t);
+}
+
 static void draw_screenBMP2(bool OnlyAHI) {
 	uint64_t step2 = 0;
 	if (cntr++ < 0) // skip in the beginning to show to font preview
@@ -2205,6 +2311,10 @@ static void draw_screenBMP2(bool OnlyAHI) {
 
 	// strcpy(osds[FULL_OVERLAY_ID].text,"$M $B Test");//"$M $B Test");
 	DrawTextOnOSDBitmap(NULL);
+
+	/* Pixel OSD on top of the character layer, and before the detection pass
+	 * so the boxes stay behind both. */
+	px_osd_draw();
 
 #if defined(__SIGMASTAR__)
 	/* AI fusion: draw the IPU worker's detection boxes into the SAME canvas,
