@@ -152,8 +152,11 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 	/* Only the graduations that can land inside the box. */
 	int reach = (int)(((float)h / 2.0f) / px_per_deg) + (int)step_deg * 2;
 	for (int d = -reach; d <= reach; d += (int)step_deg) {
-		/* Offset along the ladder's own axis, perpendicular to the horizon. */
-		float off = ((float)d - pitch_deg) * px_per_deg;
+		/* Offset along the ladder's own axis, perpendicular to the horizon.
+		 * The zero bar gets NO offset: it is the reference, pinned to the
+		 * reticle - its centre IS the crosshair, always. Roll turns it,
+		 * pitch slides the graduations past it. */
+		float off = (d == 0) ? 0.0f : ((float)d - pitch_deg) * px_per_deg;
 		int ox = (int)lrintf(-sa * off);
 		int oy = (int)lrintf(-ca * off);
 		int bx = cx + ox, by = cy - oy;
@@ -167,13 +170,21 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 
 		/* Both the horizon and the graduations are two segments with a gap in
 		 * the middle: the aircraft reference belongs IN that gap, not under a
-		 * line drawn across it. */
-		int gx = (int)lrintf(ca * (float)gap);
-		int gy = (int)lrintf(sa * (float)gap);
+		 * line drawn across it. The reference bar hugs the pip tighter than
+		 * the graduations do. */
+		int g = (d == 0) ? gap / 2 : gap;
+		int gx = (int)lrintf(ca * (float)g);
+		int gy = (int)lrintf(sa * (float)g);
 		int ix0 = bx - gx, iy0 = by + gy;   /* inner end, left segment  */
 		int ix1 = bx + gx, iy1 = by - gy;   /* inner end, right segment */
 
 		if (d == 0) {
+			/* The reference bar wears an outline so it holds against
+			 * bright sky, like every readout does. */
+			if (edge != PX_TRANSPARENT) {
+				px_line_thick(c, x0, y0, ix0, iy0, 4, edge);
+				px_line_thick(c, ix1, iy1, x1, y1, 4, edge);
+			}
 			px_line_thick(c, x0, y0, ix0, iy0, 2, col);
 			px_line_thick(c, ix1, iy1, x1, y1, 2, col);
 			continue;
@@ -208,39 +219,19 @@ void px_hud_crosshair(const PxCanvas *c, int cx, int cy, int size,
 	const int r = size / 3;          /* ring radius   */
 	const int arm = size / 2;        /* spike reach   */
 
-	/* A ringed pip with radial spikes, sitting in the gap the horizon leaves.
-	 * The ring keeps the exact centre visible against both sky and ground, and
-	 * the spikes give it presence without a solid mass that would hide whatever
-	 * the aircraft is pointed at. */
+	/* A small ringed pip with three ticks - up, left, right - the reticle the
+	 * roll bar is centred on. No tick below: the ground side stays open, one
+	 * more cue for which way is down. The ring keeps the exact centre visible
+	 * against both sky and ground without a solid mass hiding what the
+	 * aircraft points at. */
 	if (edge != PX_TRANSPARENT) {
 		px_circle(c, cx, cy, r + 1, edge);   /* dark halo, for light ground */
 		px_circle(c, cx, cy, r - 1, edge);
 	}
 	px_circle(c, cx, cy, r, color);
 
-	for (int i = 0; i < 8; i++) {
-		float a = (float)i * (float)M_PI / 4.0f;
-		int sx = (int)lrintf(cosf(a) * (float)(r + 2));
-		int sy = (int)lrintf(sinf(a) * (float)(r + 2));
-		int ex = (int)lrintf(cosf(a) * (float)arm);
-		int ey = (int)lrintf(sinf(a) * (float)arm);
-		px_line(c, cx + sx, cy + sy, cx + ex, cy + ey, color);
-	}
+	px_vline(c, cx, cy - arm - 4, cy - r - 1, color);   /* up    */
+	px_hline(c, cx - arm - 4, cx - r - 1, cy, color);   /* left  */
+	px_hline(c, cx + r + 1, cx + arm + 4, cy, color);   /* right */
 	px_set(c, cx, cy, color);
-
-	/* The aircraft reference bar: fixed wings either side, centred on the pip.
-	 * This is the bar the ladder's graduations are read against - it never
-	 * moves, the world does. Outer tips drop toward the ground so the symbol
-	 * still says which way is down when the video gives no other cue. */
-	const int span = size * 2;       /* wing length, each side */
-	const int wgap = arm + 4;        /* clear of the spikes    */
-	for (int s = -1; s <= 1; s += 2) {
-		int x0 = cx + s * wgap, x1 = cx + s * span;
-		if (edge != PX_TRANSPARENT) {
-			px_line_thick(c, x0, cy, x1, cy, 4, edge);
-			px_line_thick(c, x1, cy, x1, cy + 8, 4, edge);
-		}
-		px_line_thick(c, x0, cy, x1, cy, 2, color);
-		px_line_thick(c, x1, cy, x1, cy + 8, 2, color);
-	}
 }
