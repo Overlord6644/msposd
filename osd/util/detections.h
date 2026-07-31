@@ -21,7 +21,15 @@
 #define DET_STALE_MS 1500
 #define DET_MAX 32
 
-/* Draw the current detections into an I4 canvas of size w x h.
+/* Load this frame's detections and report the pixel-space bounding rectangle
+ * of everything the draw pass will touch (boxes plus labels), for a canvas of
+ * w x h. Returns the detection count; with none, *bx1 < *bx0. Call once per
+ * frame BEFORE draw_detections_i4 - the draw uses the set loaded here, so a
+ * dirty-rect cache can clear and repair exactly the area involved. */
+int detections_refresh(uint32_t w, uint32_t h, int *bx0, int *by0, int *bx1,
+	int *by1);
+
+/* Draw the set loaded by detections_refresh() into an I4 canvas of size w x h.
  * rowStride = bytes per row. Returns number of boxes drawn. */
 int draw_detections_i4(uint8_t *bmpData, uint32_t w, uint32_t h, uint32_t rowStride);
 

@@ -59,6 +59,7 @@
 #include "osd/util/subtitle.h"
 #include "osd/pixel/px_layout.h"
 #include "osd/pixel/px_datalink.h"
+#include "osd/pixel/px_text.h"
 
 #define CPU_TEMP_PATH "/sys/devices/platform/soc/f0a00000.apb/f0a71000.omc/temp1"
 #define AU_VOLTAGE_PATH "/sys/devices/platform/soc/f0a00000.apb/f0a71000.omc/voltage4"
@@ -2135,8 +2136,12 @@ static int g_px_layout_loaded;
 static struct {
 	uint8_t      *buf;
 	PxLayoutCache cache;
+	/* Where last frame's detection boxes landed ON THIS BUFFER: the next
+	 * frame drawn here must clear that area or the boxes trail. */
+	PxDirty       det;
 } g_px_bufs[PX_OSD_BUFS];
 static PxLayoutCache *g_px_cache;   /* cache belonging to this frame's buffer */
+static PxDirty *g_px_det_prev;      /* its previous detection footprint */
 static int g_px_incremental;        /* this frame: the caller skipped the clear */
 
 int px_osd_load_layout(const char *path)
@@ -2173,12 +2178,14 @@ static int px_osd_need_clear(uint8_t *buf)
 {
 	g_px_incremental = 0;
 	g_px_cache = NULL;
+	g_px_det_prev = NULL;
 	if (!g_px_layout_loaded || DrawOSD || !buf)
 		return 1;
 
 	for (int i = 0; i < PX_OSD_BUFS; i++)
 		if (g_px_bufs[i].buf == buf) {
 			g_px_cache = &g_px_bufs[i].cache;
+			g_px_det_prev = &g_px_bufs[i].det;
 			g_px_incremental = 1;
 			return 0; /* we know what this buffer already holds */
 		}
@@ -2190,12 +2197,16 @@ static int px_osd_need_clear(uint8_t *buf)
 		if (!g_px_bufs[i].buf) {
 			g_px_bufs[i].buf = buf;
 			g_px_cache = &g_px_bufs[i].cache;
+			g_px_det_prev = &g_px_bufs[i].det;
 			px_layout_cache_reset(g_px_cache);
+			px_dirty_reset(g_px_det_prev);
 			return 1;
 		}
 	g_px_bufs[0].buf = buf;
 	g_px_cache = &g_px_bufs[0].cache;
+	g_px_det_prev = &g_px_bufs[0].det;
 	px_layout_cache_reset(g_px_cache);
+	px_dirty_reset(g_px_det_prev);
 	return 1;
 }
 
@@ -2203,7 +2214,10 @@ static void px_osd_fill(PxTelemetry *t)
 {
 	memset(t, 0, sizeof(*t));
 	t->roll_deg = (float)last_roll / 10.0f;    /* decidegrees */
-	t->pitch_deg = (float)last_pitch / 10.0f;
+	/* Negated, matching what draw_Ladder() does by default: nose down must
+	 * bring the below-horizon graduations UP into view. Confirmed on the
+	 * aircraft - raw MSP pitch runs the ladder backwards. */
+	t->pitch_deg = -(float)last_pitch / 10.0f;
 	t->yaw_deg = (float)last_heading;
 	t->volt_v = (float)last_vbat_cv / 100.0f;  /* centivolts */
 	t->curr_a = (float)last_amperage_ca / 100.0f;
@@ -2243,7 +2257,7 @@ static void px_osd_fill(PxTelemetry *t)
 	t->valid = 1;
 }
 
-static void px_osd_draw(void)
+static void px_osd_draw(const PxDirty *det_now)
 {
 	if (!g_px_layout_loaded || bmpBuff.pData == NULL)
 		return;
@@ -2268,8 +2282,33 @@ static void px_osd_draw(void)
 	if (g_px_cache) {
 		/* Same call either way: on a freshly cleared buffer the cache was just
 		 * reset, so every widget is redrawn and recorded, and the next frame on
-		 * that buffer only touches what moved. */
-		px_layout_draw_cached(&g_px_layout, &c, &t, g_px_cache);
+		 * that buffer only touches what moved.
+		 *
+		 * The extra rect is the detection boxes' footprint - last frame's on
+		 * THIS buffer (must be erased) unioned with this frame's (widgets
+		 * under it must be repaired before the boxes repaint). Without it the
+		 * cache has no idea the boxes exist, and they trail. */
+		PxDirty extra;
+		px_dirty_reset(&extra);
+		if (g_px_det_prev && g_px_det_prev->x1 >= g_px_det_prev->x0)
+			extra = *g_px_det_prev;
+		if (det_now && det_now->x1 >= det_now->x0) {
+			if (extra.x1 < extra.x0)
+				extra = *det_now;
+			else {
+				if (det_now->x0 < extra.x0) extra.x0 = det_now->x0;
+				if (det_now->y0 < extra.y0) extra.y0 = det_now->y0;
+				if (det_now->x1 > extra.x1) extra.x1 = det_now->x1;
+				if (det_now->y1 > extra.y1) extra.y1 = det_now->y1;
+			}
+		}
+		px_layout_draw_cached_ex(&g_px_layout, &c, &t, g_px_cache, &extra);
+		if (g_px_det_prev) {
+			if (det_now)
+				*g_px_det_prev = *det_now;
+			else
+				px_dirty_reset(g_px_det_prev);
+		}
 	} else {
 		px_layout_draw(&g_px_layout, &c, &t);
 	}
@@ -2418,21 +2457,36 @@ static void draw_screenBMP2(bool OnlyAHI) {
 	}
 
 	// strcpy(osds[FULL_OVERLAY_ID].text,"$M $B Test");//"$M $B Test");
-	DrawTextOnOSDBitmap(NULL);
-
-	/* Pixel OSD on top of the character layer, and before the detection pass
-	 * so the boxes stay behind both. */
-	px_osd_draw();
+	/* The info-message text block is the character era's datalink display; the
+	 * pixel OSD parses the same line into its own widgets, so drawing both
+	 * prints the link stats twice in two fonts. */
+	if (!px_osd_active())
+		DrawTextOnOSDBitmap(NULL);
 
 #if defined(__SIGMASTAR__)
-	/* AI fusion: draw the IPU worker's detection boxes into the SAME canvas,
-	 * AFTER the OSD but only where the canvas is still transparent. That keeps
-	 * the OSD's fast memcpy glyph blit untouched (CPU!) while the boxes still
-	 * read as being *behind* the OSD. One region owner = no RGN conflict, which
-	 * this platform cannot do (see osd/util/detections.c). */
+	/* AI fusion: the IPU worker's detection boxes go into the SAME canvas,
+	 * AFTER the OSD but only where the canvas is still transparent - boxes
+	 * read as behind the OSD, one region owner, no RGN conflict (see
+	 * osd/util/detections.c). Loaded and measured BEFORE the pixel pass:
+	 * the dirty-rect cache must know the boxes' footprint to erase last
+	 * frame's and repair whatever sits under this frame's. */
+	PxDirty det_now;
+	px_dirty_reset(&det_now);
+	if (PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 && bmpBuff.pData != NULL) {
+		int bx0, by0, bx1, by1;
+		detections_refresh(bmpBuff.u32Width, bmpBuff.u32Height,
+			&bx0, &by0, &bx1, &by1);
+		if (bx1 >= bx0) {
+			det_now.x0 = bx0; det_now.y0 = by0;
+			det_now.x1 = bx1; det_now.y1 = by1;
+		}
+	}
+	px_osd_draw(&det_now);
 	if (PIXEL_FORMAT_DEFAULT == PIXEL_FORMAT_I4 && bmpBuff.pData != NULL)
 		draw_detections_i4(bmpBuff.pData, bmpBuff.u32Width, bmpBuff.u32Height,
 			getRowStride(bmpBuff.u32Width, PIXEL_FORMAT_BitsPerPixel));
+#else
+	px_osd_draw(NULL);
 #endif
 
 	stat_screen_refresh_count++;

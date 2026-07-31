@@ -165,4 +165,13 @@ void px_layout_cache_reset(PxLayoutCache *cache);
 int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
 	const PxTelemetry *t, PxLayoutCache *cache);
 
+/* Same, with an extra rectangle the caller wants cleared and repaired this
+ * frame - for content it draws onto the canvas OUTSIDE the layout (detection
+ * boxes). The union is cleared, widgets intersecting it are redrawn in depth
+ * order, and the caller then repaints its own content on top. Without this,
+ * whatever the caller drew last frame would simply stay on screen: nothing in
+ * the cache knows to erase it. NULL or an empty rect means none. */
+int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
+	const PxTelemetry *t, PxLayoutCache *cache, const PxDirty *extra);
+
 #endif /* PX_LAYOUT_H */

@@ -1623,8 +1623,17 @@ int main(int argc, char **argv) {
 	}
 
 	strcpy(_port_name, port_name);
-	if (pixel_layout_path)
+	if (pixel_layout_path) {
+		/* The pixel OSD owns the canvas. -z flips DrawOSD on as a side effect
+		 * of setting the resolution, and with both paths live the character
+		 * grid renders on top of the pixel HUD - the whole Betaflight OSD
+		 * twice, in two fonts. One owner. */
+		if (DrawOSD) {
+			printf("pixel layout set: character OSD disabled, -P owns the canvas\n");
+			DrawOSD = false;
+		}
 		px_osd_load_layout(pixel_layout_path);
+	}
 
 	if (detect_sidecar_port > 0 &&
 		det_sidecar_open("127.0.0.1", detect_sidecar_port) != 0)

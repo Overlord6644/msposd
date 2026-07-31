@@ -756,6 +756,12 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
 	const PxTelemetry *t, PxLayoutCache *cache)
 {
+	return px_layout_draw_cached_ex(l, c, t, cache, NULL);
+}
+
+int px_layout_draw_cached_ex(const PxLayout *l, const PxCanvas *c,
+	const PxTelemetry *t, PxLayoutCache *cache, const PxDirty *extra)
+{
 	const float s = px_layout_scale_for(l, c);
 	int order[PX_LAYOUT_MAX_WIDGETS];
 	draw_order(l, order);
@@ -793,6 +799,12 @@ int px_layout_draw_cached(const PxLayout *l, const PxCanvas *c,
 			 * lands in the same place this time. */
 			region_add(&region, &cache->box[i]);
 		}
+	}
+	/* Caller-drawn content (detection boxes): its old pixels must be cleared
+	 * and its new area repaired exactly like a moved widget's. */
+	if (extra && extra->x1 >= extra->x0) {
+		region_add(&region, extra);
+		any = 1;
 	}
 	if (!any) {
 		cache->primed = 1;

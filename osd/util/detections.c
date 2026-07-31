@@ -239,9 +239,49 @@ static void draw_text(uint8_t *bmp, uint32_t w, uint32_t h, uint32_t rs, int x, 
 
 extern bool verbose;
 
+/* One set per frame: detections_refresh() loads and measures, the draw call
+ * paints the same set. Loading twice would double-parse the sidecar and could
+ * even disagree with itself if a packet landed in between. */
+static det_t g_dets[DET_MAX];
+static int g_ndets;
+
+int detections_refresh(uint32_t w, uint32_t h, int *bx0, int *by0, int *bx1,
+	int *by1) {
+	g_ndets = load_dets(g_dets, DET_MAX);
+	int have = 0;
+	*bx0 = *by0 = 0;
+	*bx1 = *by1 = -1;
+	for (int i = 0; i < g_ndets; i++) {
+		int x1 = (int)(g_dets[i].x1 * (float)w);
+		int y1 = (int)(g_dets[i].y1 * (float)h);
+		int x2 = (int)(g_dets[i].x2 * (float)w);
+		int y2 = (int)(g_dets[i].y2 * (float)h);
+		if (x2 - x1 < 4 || y2 - y1 < 4)
+			continue;
+		/* The label extends the box: same maths as the draw pass below. */
+		int lh = GH * DET_TEXT_SCALE;
+		int ty = (y1 - lh - 2 >= 0) ? y1 - lh - 2 : y1 + 2;
+		int lx1 = x1 + 6 * DET_TEXT_SCALE * 12; /* worst-case label width */
+		if (ty < y1)
+			y1 = ty;
+		if (lx1 > x2)
+			x2 = lx1;
+		if (!have) {
+			*bx0 = x1; *by0 = y1; *bx1 = x2; *by1 = y2;
+			have = 1;
+		} else {
+			if (x1 < *bx0) *bx0 = x1;
+			if (y1 < *by0) *by0 = y1;
+			if (x2 > *bx1) *bx1 = x2;
+			if (y2 > *by1) *by1 = y2;
+		}
+	}
+	return g_ndets;
+}
+
 int draw_detections_i4(uint8_t *bmpData, uint32_t w, uint32_t h, uint32_t rowStride) {
-	det_t dets[DET_MAX];
-	int n = load_dets(dets, DET_MAX);
+	det_t *dets = g_dets;
+	int n = g_ndets;
 	static int last_logged = -1;
 	if (verbose && n != last_logged) {
 		printf("[FUSION] drawing %d box(es) on %ux%u stride %u\n", n, w, h, rowStride);
