@@ -54,6 +54,7 @@ typedef enum {
 	PX_W_TAPE,      /* vertical speed/altitude ladder with a value box */
 	PX_W_LADDER,    /* pitch ladder rotated to the current roll */
 	PX_W_CROSSHAIR, /* fixed aircraft reference */
+	PX_W_VARIO,     /* stacked climb/descend arrows plus the rate */
 } PxWidgetType;
 
 typedef struct {

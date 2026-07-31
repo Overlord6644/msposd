@@ -152,6 +152,7 @@ static PxWidgetType parse_type(const char *s)
 	if (!strcmp(s, "tape"))      return PX_W_TAPE;
 	if (!strcmp(s, "ladder"))    return PX_W_LADDER;
 	if (!strcmp(s, "crosshair")) return PX_W_CROSSHAIR;
+	if (!strcmp(s, "vario"))     return PX_W_VARIO;
 	return PX_W_NONE;
 }
 
@@ -537,6 +538,56 @@ static void draw_arrow(const PxWidget *w, const PxCanvas *c,
 		px_triangle(c, p[0], p[1], p[2], p[3], p[4], p[5], w->edge);
 }
 
+/* Which vario arrows show: +1 climb (green up only), -1 descend (red down
+ * only), 0 level (both, dimmed by nothing - the pair IS the "level" symbol).
+ * Shared by draw and signature. The 0.15 m/s band swallows baro noise, which
+ * would otherwise blink the arrows on a parked aircraft. */
+static int vario_state(const PxWidget *w, const PxTelemetry *t, float *out_v)
+{
+	float v = 0.0f;
+	px_telemetry_value(t, *w->source ? w->source : "vspd", &v);
+	if (out_v)
+		*out_v = v;
+	return (v > 0.15f) ? 1 : (v < -0.15f ? -1 : 0);
+}
+
+static void draw_vario(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	float v = 0.0f;
+	int st = vario_state(w, t, &v);
+	int s = w->size > 0 ? w->size : 22;
+	int aw = (s * 2) / 3;        /* arrow half-width  */
+	int ah = (s * 5) / 8;        /* arrow height      */
+	int cx = w->x + aw;          /* arrows' centre column */
+	int gap = 3;
+
+	/* Stacked like the Betaflight glyph: up above, down below. Climbing
+	 * hides the down arrow, descending hides the up one - the symbol reads
+	 * before the sign of the number does. */
+	if (st >= 0) {
+		int base = w->y - gap / 2 - (st > 0 ? -gap / 2 : 0);
+		px_fill_triangle(c, cx, base - ah, cx - aw, base, cx + aw, base,
+			PX_GREEN);
+		if (w->edge != PX_TRANSPARENT)
+			px_triangle(c, cx, base - ah, cx - aw, base, cx + aw, base,
+				w->edge);
+	}
+	if (st <= 0) {
+		int top = w->y + gap / 2 + (st < 0 ? -gap / 2 : 0);
+		px_fill_triangle(c, cx, top + ah, cx - aw, top, cx + aw, top,
+			PX_RED);
+		if (w->edge != PX_TRANSPARENT)
+			px_triangle(c, cx, top + ah, cx - aw, top, cx + aw, top,
+				w->edge);
+	}
+
+	char buf[24];
+	snprintf(buf, sizeof(buf), *w->format ? w->format : "%.1fM/S",
+		v < 0 ? -v : v); /* the arrow carries the sign */
+	px_text(c, w->x + 2 * aw + 8, w->y + s / 3, buf, s, w->color, w->edge);
+}
+
 float px_layout_scale_for(const PxLayout *l, const PxCanvas *c)
 {
 	if (!l->scale_auto)
@@ -578,6 +629,7 @@ static void draw_widget(const PxWidget *w, const PxCanvas *c,
 		px_hud_crosshair(c, w->x, w->y, w->size > 0 ? w->size : 28,
 			w->color, w->edge);
 		break;
+	case PX_W_VARIO:   draw_vario(w, c, t);       break;
 	case PX_W_RECT:
 		if (w->fill != PX_TRANSPARENT)
 			px_fill_rect(c, w->x, w->y, w->x + w->w,
@@ -761,6 +813,15 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		int qp = (int)lrintf(t->pitch_deg * pd);       /* whole pixels */
 		h = fnv1a(h, &qr, sizeof(qr));
 		return fnv1a(h, &qp, sizeof(qp));
+	}
+	case PX_W_VARIO: {
+		float v = 0.0f;
+		int st = vario_state(w, t, &v);
+		char buf[24];
+		snprintf(buf, sizeof(buf), *w->format ? w->format : "%.1fM/S",
+			v < 0 ? -v : v);
+		h = fnv1a(h, &st, sizeof(st));
+		return fnv1a(h, buf, strlen(buf));
 	}
 	default:
 		return h; /* static: signature never changes, drawn once */
