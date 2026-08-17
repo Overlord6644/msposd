@@ -692,12 +692,49 @@ static int glow_state(const PxWidget *w, const PxTelemetry *t)
 	return 0;
 }
 
-/* The DJI-style low-signal vignette: a translucent frame along the screen
- * edges. The palette holds one translucency per glow colour, so the fade
- * toward the centre is drawn with coverage instead of alpha: a solid outer
- * band, a half-dithered ring, then a quarter-dithered ring. Ignores the
- * widget's x/y/w/h - the frame IS the canvas edge; only `size` (one band's
- * width, layout-scaled) shapes it. */
+/* 8x8 Bayer matrix, values 0..63. Ordered dithering against it turns the
+ * single translucent palette entry into ~64 apparent opacity levels: I4 has
+ * no per-pixel alpha, but coverage quantised this finely reads as a smooth
+ * gradient at viewing distance - the same trick 1-bit printers use. */
+static const uint8_t bayer8[8][8] = {
+	{ 0, 32,  8, 40,  2, 34, 10, 42},
+	{48, 16, 56, 24, 50, 18, 58, 26},
+	{12, 44,  4, 36, 14, 46,  6, 38},
+	{60, 28, 52, 20, 62, 30, 54, 22},
+	{ 3, 35, 11, 43,  1, 33,  9, 41},
+	{51, 19, 59, 27, 49, 17, 57, 25},
+	{15, 47,  7, 39, 13, 45,  5, 37},
+	{63, 31, 55, 23, 61, 29, 53, 21},
+};
+
+/* One row's worth of vignette across [x0,x1): coverage falls off with the
+ * pixel's distance to the NEAREST screen edge (min over all four), so the
+ * glow is uniform around the frame and the corners join naturally. */
+static void glow_span(const PxCanvas *c, int y, int x0, int x1, int depth,
+	uint8_t col)
+{
+	const int W = c->w, H = c->h;
+	const int dy = (y < H - 1 - y) ? y : H - 1 - y;
+	for (int x = x0; x < x1; x++) {
+		int dx = (x < W - 1 - x) ? x : W - 1 - x;
+		int d = (dx < dy) ? dx : dy;
+		if (d >= depth)
+			continue;
+		/* Quadratic feather: dense at the rim, vanishing at `depth`.
+		 * cov in 0..64 against the 0..63 matrix, so the outermost
+		 * pixels are always painted and the innermost never are. */
+		int r = depth - d;
+		int cov = (64 * r * r) / (depth * depth);
+		if (cov > bayer8[y & 7][x & 7])
+			px_set(c, x, y, col);
+	}
+}
+
+/* The DJI-style low-signal vignette: a translucent glow bleeding in from
+ * every screen edge, fading over `3 * size` pixels (layout-scaled). Ignores
+ * the widget's x/y/w/h - the frame IS the canvas edge. Painted only on a
+ * state change (see widget_sig), so the per-pixel loop is not per-frame
+ * work. */
 static void draw_glow(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
 {
@@ -705,41 +742,20 @@ static void draw_glow(const PxWidget *w, const PxCanvas *c,
 	if (st == 0)
 		return;
 	uint8_t col = (st == 2) ? PX_GLOW_RED : PX_GLOW_ORANGE;
-	int band = w->size > 0 ? w->size : 22;
-	int W = c->w, H = c->h;
+	const int W = c->w, H = c->h;
+	int depth = (w->size > 0 ? w->size : 22) * 3;
+	if (depth > H / 2)
+		depth = H / 2;
 
-	/* Outer band, solid. */
-	px_fill_rect(c, 0, 0, W - 1, band - 1, col);
-	px_fill_rect(c, 0, H - band, W - 1, H - 1, col);
-	px_fill_rect(c, 0, band, band - 1, H - band - 1, col);
-	px_fill_rect(c, W - band, band, W - 1, H - band - 1, col);
-
-	/* Two dithered rings, 50% then 25% coverage. Only ever painted on a
-	 * state change (see widget_sig), so the per-pixel loop is not per-frame
-	 * work. */
-	for (int ring = 1; ring <= 2; ring++) {
-		int d0 = band * ring, d1 = band * (ring + 1);
-		for (int y = d0; y < d1 && y < H - d0; y++) {          /* top */
-			for (int x = 0; x < W; x++)
-				if ((ring == 1) ? (((x + y) & 1) == 0)
-						: (((x & 1) | (y & 1)) == 0))
-					px_set(c, x, y, col);
-		}
-		for (int y = H - d1; y < H - d0; y++) {                /* bottom */
-			for (int x = 0; x < W; x++)
-				if ((ring == 1) ? (((x + y) & 1) == 0)
-						: (((x & 1) | (y & 1)) == 0))
-					px_set(c, x, y, col);
-		}
-		for (int y = d1; y < H - d1; y++) {                    /* sides */
-			for (int x = d0; x < d1; x++)
-				if ((ring == 1) ? (((x + y) & 1) == 0)
-						: (((x & 1) | (y & 1)) == 0))
-					px_set(c, x, y, col);
-			for (int x = W - d1; x < W - d0; x++)
-				if ((ring == 1) ? (((x + y) & 1) == 0)
-						: (((x & 1) | (y & 1)) == 0))
-					px_set(c, x, y, col);
+	for (int y = 0; y < H; y++) {
+		int dy = (y < H - 1 - y) ? y : H - 1 - y;
+		if (dy < depth) {
+			glow_span(c, y, 0, W, depth, col);
+		} else {
+			/* Middle rows: only the side margins can be inside the
+			 * falloff - skip the untouched centre entirely. */
+			glow_span(c, y, 0, depth, depth, col);
+			glow_span(c, y, W - depth, W, depth, col);
 		}
 	}
 }
