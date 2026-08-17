@@ -46,6 +46,7 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		{"dl_ch",       (float)t->dl.channel},
 		{"dl_bw",       (float)t->dl.bandwidth_mhz},
 		{"dl_q",        (float)t->dl.pubq},
+		{"dl_age",      t->dl_age_s},
 		{"armed",       (float)t->armed},
 		{"cells",       (float)t->cells},
 		/* Per-cell voltage is the number a pilot actually flies by: 3.5 means
@@ -154,6 +155,7 @@ static PxWidgetType parse_type(const char *s)
 	if (!strcmp(s, "ladder"))    return PX_W_LADDER;
 	if (!strcmp(s, "crosshair")) return PX_W_CROSSHAIR;
 	if (!strcmp(s, "vario"))     return PX_W_VARIO;
+	if (!strcmp(s, "glow"))      return PX_W_GLOW;
 	return PX_W_NONE;
 }
 
@@ -660,6 +662,88 @@ static void scale_widget(PxWidget *w, float s)
 	w->pitch_scale *= s;
 }
 
+/* Glow state: 0 off, 1 warn (orange), 2 crit (red). Thresholds work like
+ * threshold_color - direction inferred from their order - but the result is
+ * a discrete state, because every pixel of the vignette depends only on it.
+ * A stale link report forces red: when the link daemon dies, dl_lq freezes
+ * at its last (often healthy) value, and the file's age is the only signal
+ * left. Gated on dl.have so a bench setup that never ran the daemon does
+ * not glow red forever. */
+static int glow_state(const PxWidget *w, const PxTelemetry *t)
+{
+	if (t->dl.have && t->dl_age_s > 3.0f)
+		return 2;
+	float v = 0.0f;
+	if (!px_telemetry_value(t, *w->source ? w->source : "dl_lq", &v))
+		return 0;
+	if (w->warn == w->crit)
+		return 0; /* thresholds disabled, widget inert */
+	if (w->crit < w->warn) { /* low is bad: link quality, RSSI */
+		if (v <= w->crit)
+			return 2;
+		if (v <= w->warn)
+			return 1;
+	} else {
+		if (v >= w->crit)
+			return 2;
+		if (v >= w->warn)
+			return 1;
+	}
+	return 0;
+}
+
+/* The DJI-style low-signal vignette: a translucent frame along the screen
+ * edges. The palette holds one translucency per glow colour, so the fade
+ * toward the centre is drawn with coverage instead of alpha: a solid outer
+ * band, a half-dithered ring, then a quarter-dithered ring. Ignores the
+ * widget's x/y/w/h - the frame IS the canvas edge; only `size` (one band's
+ * width, layout-scaled) shapes it. */
+static void draw_glow(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	int st = glow_state(w, t);
+	if (st == 0)
+		return;
+	uint8_t col = (st == 2) ? PX_GLOW_RED : PX_GLOW_ORANGE;
+	int band = w->size > 0 ? w->size : 22;
+	int W = c->w, H = c->h;
+
+	/* Outer band, solid. */
+	px_fill_rect(c, 0, 0, W - 1, band - 1, col);
+	px_fill_rect(c, 0, H - band, W - 1, H - 1, col);
+	px_fill_rect(c, 0, band, band - 1, H - band - 1, col);
+	px_fill_rect(c, W - band, band, W - 1, H - band - 1, col);
+
+	/* Two dithered rings, 50% then 25% coverage. Only ever painted on a
+	 * state change (see widget_sig), so the per-pixel loop is not per-frame
+	 * work. */
+	for (int ring = 1; ring <= 2; ring++) {
+		int d0 = band * ring, d1 = band * (ring + 1);
+		for (int y = d0; y < d1 && y < H - d0; y++) {          /* top */
+			for (int x = 0; x < W; x++)
+				if ((ring == 1) ? (((x + y) & 1) == 0)
+						: (((x & 1) | (y & 1)) == 0))
+					px_set(c, x, y, col);
+		}
+		for (int y = H - d1; y < H - d0; y++) {                /* bottom */
+			for (int x = 0; x < W; x++)
+				if ((ring == 1) ? (((x + y) & 1) == 0)
+						: (((x & 1) | (y & 1)) == 0))
+					px_set(c, x, y, col);
+		}
+		for (int y = d1; y < H - d1; y++) {                    /* sides */
+			for (int x = d0; x < d1; x++)
+				if ((ring == 1) ? (((x + y) & 1) == 0)
+						: (((x & 1) | (y & 1)) == 0))
+					px_set(c, x, y, col);
+			for (int x = W - d1; x < W - d0; x++)
+				if ((ring == 1) ? (((x + y) & 1) == 0)
+						: (((x & 1) | (y & 1)) == 0))
+					px_set(c, x, y, col);
+		}
+	}
+}
+
 static void draw_widget(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
 {
@@ -677,6 +761,7 @@ static void draw_widget(const PxWidget *w, const PxCanvas *c,
 			w->color, w->edge);
 		break;
 	case PX_W_VARIO:   draw_vario(w, c, t);       break;
+	case PX_W_GLOW:    draw_glow(w, c, t);        break;
 	case PX_W_RECT:
 		if (w->fill != PX_TRANSPARENT)
 			px_fill_rect(c, w->x, w->y, w->x + w->w,
@@ -852,6 +937,14 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 			v < 0 ? -v : v);
 		h = fnv1a(h, &st, sizeof(st));
 		return fnv1a(h, buf, strlen(buf));
+	}
+	case PX_W_GLOW: {
+		/* Every pixel depends only on the discrete state, so only the
+		 * state is hashed: a full-canvas widget with a per-frame-varying
+		 * signature would drag the whole layout into a redraw every
+		 * frame. */
+		int st = glow_state(w, t);
+		return fnv1a(h, &st, sizeof(st));
 	}
 	default:
 		return h; /* static: signature never changes, drawn once */

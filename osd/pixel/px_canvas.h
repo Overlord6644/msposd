@@ -31,7 +31,9 @@
 #define PX_WHITE       7
 #define PX_BLACK       8
 #define PX_SHADE       9  /* semi-transparent black - backdrops */
+#define PX_GLOW_RED   10  /* translucent red - low-signal vignette */
 #define PX_ORANGE     11  /* threshold step between yellow and red */
+#define PX_GLOW_ORANGE 12 /* translucent orange - vignette warn step */
 #define PX_GRAY_LIGHT 13
 #define PX_GRAY_DARK  14
 #define PX_TRANSPARENT 15 /* the value msposd clears the canvas to */

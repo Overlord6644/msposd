@@ -55,6 +55,10 @@ typedef enum {
 	PX_W_LADDER,    /* pitch ladder rotated to the current roll */
 	PX_W_CROSSHAIR, /* fixed aircraft reference */
 	PX_W_VARIO,     /* stacked climb/descend arrows plus the rate */
+	/* Full-frame edge vignette that appears as the link degrades - the
+	 * DJI-style "you are about to lose video" glow. Ignores x/y/w/h and
+	 * draws on the whole canvas; see draw_glow in px_layout.c. */
+	PX_W_GLOW,
 } PxWidgetType;
 
 typedef struct {

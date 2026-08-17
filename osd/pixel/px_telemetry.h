@@ -55,6 +55,11 @@ typedef struct {
 	int   rssi_pct;
 	int   lq_pct;
 	PxDatalink dl;
+	/* Seconds since the link daemon's status line was last parsed. dl_lq
+	 * freezes at its last value when the link dies (absent keys keep their
+	 * previous reading), so "the link is actually gone" is only visible
+	 * here. Fed from the MSPOSD.msg parse clock in px_osd_fill. */
+	float dl_age_s;
 
 	/* Status */
 	int  armed;
