@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -2413,6 +2414,29 @@ static void px_osd_fill(PxTelemetry *t)
 	px_datalink_parse(&dl, air_unit_info_msg);
 	px_datalink_parse(&dl, osdmsg);   /* /tmp/MSPOSD.msg, the same source */
 	t->dl = dl;
+	/* Age of the link daemon's report, from the FILE's mtime - not from our
+	 * read clock. The reader above re-reads the file every second whether or
+	 * not the daemon still writes it, and parsed values freeze at their last
+	 * reading when keys vanish; the mtime is the only thing that stops
+	 * moving when the daemon actually dies. Stat'ed at most once a second -
+	 * the glow that consumes this needs no better resolution. */
+	{
+		static uint64_t last_stat_ms;
+		static float age_s;
+		uint64_t now = get_time_ms();
+		if (now - last_stat_ms >= 1000) {
+			last_stat_ms = now;
+			struct stat st;
+			if (stat(FECFile, &st) == 0) {
+				time_t wall = time(NULL);
+				age_s = (wall > st.st_mtime)
+					? (float)(wall - st.st_mtime) : 0.0f;
+			} else {
+				age_s = 9999.0f; /* no file = daemon never ran */
+			}
+		}
+		t->dl_age_s = age_s;
+	}
 	t->valid = 1;
 }
 
