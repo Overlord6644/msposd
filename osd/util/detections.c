@@ -104,7 +104,19 @@ static int glyph_index(char ch) {
 typedef struct {
 	float x1, y1, x2, y2;
 	int cls, pct;
+	unsigned id; /* track id from the worker, 0 = none */
 } det_t;
+
+/* "NAME NN%", or "NAME ID NN%" once the worker tracks the object. The refresh
+ * pass sizes its dirty rect from the same string the draw pass renders. */
+static void det_label(const det_t *d, char *buf, size_t len) {
+	const char *nm = (d->cls >= 0 && d->cls < (int)(sizeof(det_names) / sizeof(det_names[0])))
+						 ? det_names[d->cls] : "?";
+	if (d->id)
+		snprintf(buf, len, "%s %u %d%%", nm, d->id, d->pct);
+	else
+		snprintf(buf, len, "%s %d%%", nm, d->pct);
+}
 
 static uint64_t now_ms(void) {
 	struct timeval tv;
@@ -127,6 +139,7 @@ static int load_from_sidecar(det_t *out, int max) {
 		out[i].y2 = s->boxes[i].y2;
 		out[i].pct = s->boxes[i].score_pct;
 		out[i].cls = s->boxes[i].cls;
+		out[i].id = 0;
 	}
 	return n;
 }
@@ -138,7 +151,7 @@ static int load_dets(det_t *out, int max) {
 	if (stat(DET_TEST_FILE, &ts) == 0 && max > 0) {
 		out[0].x1 = 0.25f; out[0].y1 = 0.25f;
 		out[0].x2 = 0.75f; out[0].y2 = 0.75f;
-		out[0].cls = 0; out[0].pct = 99;
+		out[0].cls = 0; out[0].pct = 99; out[0].id = 0;
 		return 1;
 	}
 	/* Poll first so a live stream always wins over a stale file. */
@@ -152,7 +165,8 @@ static int load_dets(det_t *out, int max) {
 		return 0;
 	unsigned long long stamp = 0;
 	int count = 0, n = 0;
-	if (fscanf(f, "%llu %d", &stamp, &count) != 2) {
+	char line[128];
+	if (!fgets(line, sizeof(line), f) || sscanf(line, "%llu %d", &stamp, &count) != 2) {
 		fclose(f);
 		return 0;
 	}
@@ -162,9 +176,14 @@ static int load_dets(det_t *out, int max) {
 		fclose(f);
 		return 0;
 	}
+	/* Line by line, so the optional seventh field (track id) can never shift
+	 * the next record when a writer leaves it out. */
 	for (int i = 0; i < count && n < max; i++) {
 		det_t d;
-		if (fscanf(f, "%d %d %f %f %f %f", &d.cls, &d.pct, &d.x1, &d.y1, &d.x2, &d.y2) != 6)
+		d.id = 0;
+		if (!fgets(line, sizeof(line), f) ||
+			sscanf(line, "%d %d %f %f %f %f %u", &d.cls, &d.pct, &d.x1, &d.y1, &d.x2, &d.y2,
+				&d.id) < 6)
 			break;
 		out[n++] = d;
 	}
@@ -261,7 +280,9 @@ int detections_refresh(uint32_t w, uint32_t h, int *bx0, int *by0, int *bx1,
 		/* The label extends the box: same maths as the draw pass below. */
 		int lh = GH * DET_TEXT_SCALE;
 		int ty = (y1 - lh - 2 >= 0) ? y1 - lh - 2 : y1 + 2;
-		int lx1 = x1 + 6 * DET_TEXT_SCALE * 12; /* worst-case label width */
+		char label[48];
+		det_label(&g_dets[i], label, sizeof(label));
+		int lx1 = x1 + text_width(label, DET_TEXT_SCALE);
 		if (ty < y1)
 			y1 = ty;
 		if (lx1 > x2)
@@ -299,10 +320,8 @@ int draw_detections_i4(uint8_t *bmpData, uint32_t w, uint32_t h, uint32_t rowStr
 
 		/* Label "NAME NN%" above the box (inside the top edge if there is no
 		 * room), on a dark backdrop so it reads over any scene. */
-		char label[40];
-		const char *nm = (dets[i].cls >= 0 && dets[i].cls < (int)(sizeof(det_names) / sizeof(det_names[0])))
-							 ? det_names[dets[i].cls] : "?";
-		snprintf(label, sizeof(label), "%s %d%%", nm, dets[i].pct);
+		char label[48];
+		det_label(&dets[i], label, sizeof(label));
 		int lh = GH * DET_TEXT_SCALE;
 		int ty = (y1 - lh - 2 >= 0) ? y1 - lh - 2 : y1 + 2;
 		/* No backdrop: px_behind only writes transparent pixels, so a backdrop

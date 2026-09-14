@@ -3,7 +3,8 @@
  *
  * The IPU worker writes /tmp/yolo.det atomically (tmp + rename):
  *   line 1:  <epoch_ms> <count>
- *   lines:   <class> <score_pct> <x1> <y1> <x2> <y2>   (normalized 0..1 floats)
+ *   lines:   <class> <score_pct> <x1> <y1> <x2> <y2> [<track_id>]
+ *            (normalized 0..1 floats; track_id 0 or absent = untracked)
  *
  * Boxes older than DET_STALE_MS are not drawn (worker gone / paused). */
 #ifndef DETECTIONS_H
