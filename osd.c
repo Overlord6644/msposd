@@ -166,6 +166,47 @@ static int last_fm_seen = 0;
  * mode name is taken; anything else keeps the last mode. */
 static char last_ap_mode[5] = "";
 
+/* MAVLink (-M) values with no MSP counterpart; see osd/mav_osd.c. */
+static char last_mav_mode[8] = "";
+static int last_throttle_pct = 0;
+static int last_batt_pct_fc = -1; /* the FC's own estimate, -1 = unknown */
+
+/* Flight controller messages for the pixel OSD's fc_msg source: MAVLink
+ * STATUSTEXT with its severity (0 EMERG .. 7 DEBUG), or ArduPilot's MSP
+ * craft-name text, which carries none and is shown as INFO. Held for as long
+ * as ArduPilot's own OSD shows a message by default (OSD_MSG_TIME, 10 s). */
+#define FC_MSG_HOLD_MS 10000
+static char last_fc_msg[64] = "";
+static int last_fc_msg_sev = -1;
+static uint64_t last_fc_msg_ms = 0;
+
+uint64_t get_time_ms();
+
+static void set_fc_msg(const char *text, int severity)
+{
+	if (severity >= 7) /* DEBUG never reaches the pilot */
+		return;
+	/* Upper case and printable only: the OSD font is a subset, and that is
+	 * how the flight controllers' own OSDs print them. */
+	char clean[sizeof(last_fc_msg)];
+	size_t n = 0;
+	for (const char *p = text; *p && n < sizeof(clean) - 1; p++) {
+		unsigned char c = (unsigned char)*p;
+		if (c >= 'a' && c <= 'z')
+			c -= 'a' - 'A';
+		if (c >= 0x20 && c < 0x7f)
+			clean[n++] = (char)c;
+	}
+	while (n > 0 && clean[n - 1] == ' ')
+		n--;
+	clean[n] = '\0';
+	if (n == 0)
+		return;
+	snprintf(last_fc_msg, sizeof(last_fc_msg), "%s", clean);
+	last_fc_msg_sev = severity;
+	last_fc_msg_ms = get_time_ms();
+}
+
 static const char *const ap_mode_names[] = {
 	/* Plane */
 	"MANU", "CIRC", "STAB", "TRAN", "ACRO", "FBWA", "FBWB", "CRUS", "ATUN",
@@ -189,14 +230,19 @@ static void parse_ardupilot_name(const uint8_t *payload, uint8_t size)
 	}
 	token[n] = '\0';
 	/* The name must end there: "AUTOTUNE..." is a status text, not AUTO. */
-	if (n == 0 || (n < size && payload[n] != ' ' && payload[n] != '\0'))
-		return;
-	for (size_t i = 0; i < sizeof(ap_mode_names) / sizeof(ap_mode_names[0]); i++) {
+	int whole = n > 0 && (n >= size || payload[n] == ' ' || payload[n] == '\0');
+	for (size_t i = 0; whole && i < sizeof(ap_mode_names) / sizeof(ap_mode_names[0]); i++) {
 		if (strcmp(token, ap_mode_names[i]) == 0) {
 			memcpy(last_ap_mode, token, sizeof(last_ap_mode));
 			return;
 		}
 	}
+	/* Not a mode: one of ArduPilot's status texts, already scrolled by it. */
+	char text[65];
+	size_t len = size < sizeof(text) - 1 ? size : sizeof(text) - 1;
+	memcpy(text, payload, len);
+	text[len] = '\0';
+	set_fc_msg(text, 6);
 }
 
 /* Battery and link, from MSP_CMD_BATTERY_STATE and MSP_ANALOG. The pixel OSD
@@ -2399,6 +2445,9 @@ static void px_osd_fill(PxTelemetry *t)
 		int pct = 100 - (int)((long)last_mah_used * 100 / last_batt_capacity);
 		t->batt_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
 	}
+	if (last_batt_pct_fc >= 0)
+		t->batt_pct = last_batt_pct_fc > 100 ? 100 : last_batt_pct_fc;
+	t->throttle_pct = last_throttle_pct;
 	t->alt_m = (float)last_altitude;
 	t->spd_kph = (float)last_speed * 0.036f;   /* cm/s -> km/h */
 	t->vspd_ms = (float)last_vario / 100.0f;   /* cm/s -> m/s */
@@ -2442,7 +2491,9 @@ static void px_osd_fill(PxTelemetry *t)
 	 * with reordered boxes would mislabel, which is still better than a
 	 * label that means nothing on every config. Dashes until the first
 	 * STATUS response, so "no data" never reads as a mode. */
-	if (strncmp(current_fc_identifier, "ARDU", 4) == 0)
+	if (last_mav_mode[0])
+		snprintf(t->mode, sizeof(t->mode), "%s", last_mav_mode);
+	else if (strncmp(current_fc_identifier, "ARDU", 4) == 0)
 		snprintf(t->mode, sizeof(t->mode), "%s",
 			 last_ap_mode[0] ? last_ap_mode : "----");
 	else if (!last_fm_seen)
@@ -2455,6 +2506,11 @@ static void px_osd_fill(PxTelemetry *t)
 		snprintf(t->mode, sizeof(t->mode), "ACRO");
 	if (strlen(air_unit_info_msg) > 1)
 		snprintf(t->msg, sizeof(t->msg), "%s", air_unit_info_msg);
+	t->fc_msg_sev = -1;
+	if (last_fc_msg[0] && get_time_ms() - last_fc_msg_ms < FC_MSG_HOLD_MS) {
+		snprintf(t->fc_msg, sizeof(t->fc_msg), "%s", last_fc_msg);
+		t->fc_msg_sev = last_fc_msg_sev;
+	}
 	/* The air unit's link daemon has no API - it publishes one formatted line,
 	 * which the character OSD printed verbatim. Parse it so the figures can be
 	 * placed and coloured individually. Kept across frames, so a line that

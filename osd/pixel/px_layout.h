@@ -100,6 +100,10 @@ typedef struct {
 	 * the orange step); warn and crit both 0 disables the whole idea.
 	 * Text and bar widgets. */
 	float warn, alert, crit;
+	/* Text widgets: show at most `chars' characters and scroll longer text
+	 * through that window - `dwell' ms still at each end, then one character
+	 * every `scroll' ms. chars = 0 (default) never scrolls. */
+	int chars, scroll_ms, dwell_ms;
 } PxWidget;
 
 typedef struct {

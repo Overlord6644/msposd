@@ -65,6 +65,10 @@ typedef struct {
 	int  armed;
 	char mode[16];    /* flight mode name from the FC */
 	char msg[64];     /* transient warning/status line */
+	/* Latest flight controller message, empty once it has timed out, and its
+	 * MAVLink severity (0 EMERG .. 6 INFO; -1 when there is none). */
+	char fc_msg[64];
+	int  fc_msg_sev;
 
 	/* Freshness: widgets can grey out when telemetry stops. */
 	uint64_t updated_ms;

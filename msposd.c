@@ -716,6 +716,8 @@ unsigned char mavbuf[2048];
 unsigned int mavbuff_offset = 0;
 unsigned int mavpckts_count = 0;
 
+#include "osd/mav_osd.c"
+
 static void process_mavlink(uint8_t *buffer, int count, void *arg) {
 
 	mavlink_message_t message;
@@ -732,6 +734,7 @@ static void process_mavlink(uint8_t *buffer, int count, void *arg) {
 			mavpckts_ttl++;
 			system_id = message.sysid;
 			ShowVersionOnce(&message, (uint8_t)buffer[0]);
+			mav_osd_handle(&message);
 			if (verbose)
 				printf("Mavlink msg %d no: %d\n", message.msgid, message.seq);
 			switch (message.msgid) {
@@ -767,7 +770,7 @@ static void process_mavlink(uint8_t *buffer, int count, void *arg) {
 																  // buffer flushed
 				) {
 					// flush and send all data
-					if (sendto(out_sock, mavbuf, mavbuff_offset, 0, (struct sockaddr *)&sin_out,
+					if (out_sock > 0 && sendto(out_sock, mavbuf, mavbuff_offset, 0, (struct sockaddr *)&sin_out,
 							sizeof(sin_out)) == -1) {
 						perror("sendto()");
 						event_base_loopbreak(arg);
@@ -881,7 +884,7 @@ static void serial_read_cb(struct bufferevent *bev, void *arg) {
 				ttl_packets % 10 == 3) // If garbage only, give some feedback do diagnose
 				printf("Packets:%ld  Bytes:%ld\n", ttl_packets, ttl_bytes);
 
-			if (aggregate == 0) {
+			if (aggregate == 0 && out_sock > 0) {
 				if (sendto(out_sock, data, packet_len, 0, (struct sockaddr *)&sin_out,
 						sizeof(sin_out)) == -1) {
 					perror("sendto()");
@@ -891,7 +894,7 @@ static void serial_read_cb(struct bufferevent *bev, void *arg) {
 			}
 
 			// Let's try to parse the stream
-			if (aggregate > 0 || rc_channel_mon_enabled) // if no RC channel control needed, only
+			if (aggregate > 0 || rc_channel_mon_enabled || px_osd_active()) // if no RC channel control needed, only
 														 // forward the data
 				process_mavlink(data, packet_len, arg); // Let's try to parse the stream
 		}
@@ -1413,6 +1416,14 @@ static int handle_data(const char *port_name, int baudrate, const char *out_addr
 			/*&(struct timeval){.tv_usec = 5000000}*/);
 	}
 
+	// MAVLink mode has no MSP poll to drive the pixel OSD; this timer redraws
+	// it and asks the FC for the telemetry streams.
+	if (!ParseMSP && serial_fd > 0 && px_osd_active()) {
+		struct event *mav_tmr = event_new(base, -1, EV_PERSIST, mav_osd_tick, &serial_fd);
+		struct timeval mav_interval = {.tv_sec = 0, .tv_usec = 1000000 / MSP_PollRate};
+		evtimer_add(mav_tmr, &mav_interval);
+	}
+
 	event_base_dispatch(base);
 
 err:
@@ -1684,6 +1695,9 @@ int main(int argc, char **argv) {
 		}
 		// loadfonts
 	}
+	// The pixel OSD needs the overlay region in MAVLink mode too.
+	if (!ParseMSP && px_osd_active())
+		InitMSPHook();
 
 	return handle_data(port_name, baudrate, out_addr);
 }

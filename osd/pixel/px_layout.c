@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- telemetry name resolution ---- */
 
@@ -27,6 +28,7 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		{"spd",         t->spd_kph},
 		{"vspd",        t->vspd_ms},
 		{"throttle",    (float)t->throttle_pct},
+		{"fc_msg",      t->fc_msg[0] ? (float)t->fc_msg_sev : 7.0f},
 		{"sats",        (float)t->sats},
 		{"home_dist",   t->home_dist_m},
 		{"home_bearing",t->home_bearing_deg},
@@ -89,6 +91,8 @@ const char *px_telemetry_text(const PxTelemetry *t, const char *source)
 		return t->mode;
 	if (strcmp(source, "msg") == 0)
 		return t->msg;
+	if (strcmp(source, "fc_msg") == 0)
+		return t->fc_msg;
 	if (strcmp(source, "armed") == 0)
 		return t->armed ? "ARMED" : "DISARMED";
 	/* Static buffers, one per source: the draw pass and the cache signature
@@ -333,6 +337,9 @@ int px_layout_load(PxLayout *l, const char *path)
 		else if (!strcmp(key, "warn"))         w->warn = strtof(val, NULL);
 		else if (!strcmp(key, "alert"))        w->alert = strtof(val, NULL);
 		else if (!strcmp(key, "crit"))         w->crit = strtof(val, NULL);
+		else if (!strcmp(key, "chars"))        w->chars = atoi(val);
+		else if (!strcmp(key, "scroll"))       w->scroll_ms = atoi(val);
+		else if (!strcmp(key, "dwell"))        w->dwell_ms = atoi(val);
 		else if (!strcmp(key, "source"))       snprintf(w->source, sizeof(w->source), "%s", val);
 		else if (!strcmp(key, "format"))       snprintf(w->format, sizeof(w->format), "%s", val);
 		else if (!strcmp(key, "label"))        snprintf(w->label, sizeof(w->label), "%s", val);
@@ -387,26 +394,85 @@ static uint8_t threshold_color(const PxWidget *w, const PxTelemetry *t,
 	return base;
 }
 
-static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
-	const PxTelemetry *t)
+static uint64_t px_now_ms(void)
 {
-	char buf[128];
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Cut `buf' down to the widget's `chars' window, scrolled by time since the
+ * text last changed: still for `dwell' ms, one character per `scroll' ms to
+ * the end, still again, and round. The start time lives in a small table
+ * keyed by widget, since a text change restarts the scroll. */
+static void scroll_window(const PxWidget *w, char *buf)
+{
+	if (w->chars <= 0)
+		return;
+	int len = (int)strlen(buf);
+	if (len <= w->chars)
+		return;
+	static struct { const PxWidget *w; uint32_t hash; uint64_t start; } st[16];
+	uint32_t h = 2166136261u;
+	for (const char *p = buf; *p; p++)
+		h = (h ^ (uint8_t)*p) * 16777619u;
+	uint64_t now = px_now_ms();
+	int slot = -1, free_slot = -1;
+	for (int i = 0; i < 16; i++) {
+		if (st[i].w == w) { slot = i; break; }
+		if (!st[i].w && free_slot < 0) free_slot = i;
+	}
+	if (slot < 0) {
+		slot = free_slot >= 0 ? free_slot : 0;
+		st[slot].w = w;
+		st[slot].hash = h + 1; /* force a restart below */
+	}
+	if (st[slot].hash != h) {
+		st[slot].hash = h;
+		st[slot].start = now;
+	}
+	int period = w->scroll_ms > 0 ? w->scroll_ms : 125;
+	int dwell = w->dwell_ms > 0 ? w->dwell_ms : 500;
+	int steps = len - w->chars;
+	uint64_t cycle = (uint64_t)dwell * 2 + (uint64_t)steps * period;
+	uint64_t e = (now - st[slot].start) % cycle;
+	int pos = 0;
+	if (e >= (uint64_t)dwell) {
+		pos = (int)((e - dwell) / period) + 1;
+		if (pos > steps)
+			pos = steps;
+	}
+	memmove(buf, buf + pos, (size_t)w->chars);
+	buf[w->chars] = '\0';
+}
+
+static void text_widget_string(const PxWidget *w, const PxTelemetry *t,
+	char *buf, size_t n)
+{
 	const char *str = px_telemetry_text(t, w->source);
 	if (!*w->source) {
 		/* No source: a static label (units, captions), format is the text. */
-		snprintf(buf, sizeof(buf), "%s", *w->format ? w->format : w->name);
+		snprintf(buf, n, "%s", *w->format ? w->format : w->name);
 	} else if (str) {
-		snprintf(buf, sizeof(buf), *w->format ? w->format : "%s", str);
+		snprintf(buf, n, *w->format ? w->format : "%s", str);
 	} else {
 		float v = 0.0f;
 		if (!px_telemetry_value(t, w->source, &v)) {
 			/* Show the offending name instead of a plausible 0, so a
 			 * layout typo is obvious on screen. */
-			snprintf(buf, sizeof(buf), "?%s", w->source);
+			snprintf(buf, n, "?%s", w->source);
 		} else {
-			snprintf(buf, sizeof(buf), *w->format ? w->format : "%.0f", v);
+			snprintf(buf, n, *w->format ? w->format : "%.0f", v);
 		}
 	}
+	scroll_window(w, buf);
+}
+
+static void draw_text_widget(const PxWidget *w, const PxCanvas *c,
+	const PxTelemetry *t)
+{
+	char buf[128];
+	text_widget_string(w, t, buf, sizeof(buf));
 	/* The icon is part of the widget's width: alignment moves icon and text
 	 * as one block, or a centred readout would sit off-centre by half an
 	 * icon. */
@@ -881,18 +947,7 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		 * format identically genuinely draw the same pixels. The threshold
 		 * colour is part of what is drawn, so it is part of the signature. */
 		char buf[128];
-		const char *str = px_telemetry_text(t, w->source);
-		if (!*w->source)
-			snprintf(buf, sizeof(buf), "%s", *w->format ? w->format : w->name);
-		else if (str)
-			snprintf(buf, sizeof(buf), *w->format ? w->format : "%s", str);
-		else {
-			float v = 0.0f;
-			if (!px_telemetry_value(t, w->source, &v))
-				snprintf(buf, sizeof(buf), "?%s", w->source);
-			else
-				snprintf(buf, sizeof(buf), *w->format ? w->format : "%.0f", v);
-		}
+		text_widget_string(w, t, buf, sizeof(buf));
 		uint8_t col = threshold_color(w, t, w->color);
 		h = fnv1a(h, &col, sizeof(col));
 		return fnv1a(h, buf, strlen(buf));
