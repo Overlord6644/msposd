@@ -159,6 +159,46 @@ static int32_t last_lon_e7 = 0;
 static uint32_t last_fm_flags = 0;
 static int last_fm_seen = 0;
 
+/* ArduPilot only ever sets the ARM bit in MSP_STATUS, so its mode has to come
+ * from elsewhere: it puts the mode's short name ("FBWA", "RTL ", "QHOV") at the
+ * start of the MSP_NAME craft-name field, which is what DJI goggles display.
+ * The same field carries its status texts for a few seconds, so only a known
+ * mode name is taken; anything else keeps the last mode. */
+static char last_ap_mode[5] = "";
+
+static const char *const ap_mode_names[] = {
+	/* Plane */
+	"MANU", "CIRC", "STAB", "TRAN", "ACRO", "FBWA", "FBWB", "CRUS", "ATUN",
+	"AUTO", "RTL", "LOIT", "TKOF", "AVOI", "GUID", "INIT", "QSTB", "QHOV",
+	"QLOT", "QLND", "QRTL", "QACO", "QATN", "L2QL", "ALND", "THML",
+	/* Copter and Rover names that Plane does not share */
+	"ALTH", "BRAK", "DRIF", "FLIP", "FHLD", "GNGP", "LAND", "PHLD", "SRTL",
+	"SPRT", "SYSI", "THRW", "TRTL", "FOLL", "ZIGZ", "AROT", "STER", "HOLD",
+	"SAIL", "SMRT",
+};
+
+static void parse_ardupilot_name(const uint8_t *payload, uint8_t size)
+{
+	/* "FBWA", "FBWA [S]", "FBWA 4m/s<arrow>", "RTL  ---m/s": the mode is the
+	 * first four characters, trailing blanks trimmed. */
+	char token[5] = "";
+	uint8_t n = 0;
+	while (n < size && n < 4 && payload[n] > ' ' && payload[n] < 0x7f) {
+		token[n] = (char)payload[n];
+		n++;
+	}
+	token[n] = '\0';
+	/* The name must end there: "AUTOTUNE..." is a status text, not AUTO. */
+	if (n == 0 || (n < size && payload[n] != ' ' && payload[n] != '\0'))
+		return;
+	for (size_t i = 0; i < sizeof(ap_mode_names) / sizeof(ap_mode_names[0]); i++) {
+		if (strcmp(token, ap_mode_names[i]) == 0) {
+			memcpy(last_ap_mode, token, sizeof(last_ap_mode));
+			return;
+		}
+	}
+}
+
 /* Battery and link, from MSP_CMD_BATTERY_STATE and MSP_ANALOG. The pixel OSD
  * needs values rather than the character cells DisplayPort would hand us. */
 static uint16_t last_vbat_cv = 0;     /* centivolts */
@@ -486,6 +526,12 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		last_fm_seen = 1;
 		if (armed)
 			vtxMenuActive = false;
+		break;
+	}
+
+	case MSP_CMD_NAME: {
+		if (strncmp(current_fc_identifier, "ARDU", 4) == 0)
+			parse_ardupilot_name(msp_message->payload, msp_message->size);
 		break;
 	}
 
@@ -2396,7 +2442,10 @@ static void px_osd_fill(PxTelemetry *t)
 	 * with reordered boxes would mislabel, which is still better than a
 	 * label that means nothing on every config. Dashes until the first
 	 * STATUS response, so "no data" never reads as a mode. */
-	if (!last_fm_seen)
+	if (strncmp(current_fc_identifier, "ARDU", 4) == 0)
+		snprintf(t->mode, sizeof(t->mode), "%s",
+			 last_ap_mode[0] ? last_ap_mode : "----");
+	else if (!last_fm_seen)
 		snprintf(t->mode, sizeof(t->mode), "----");
 	else if (last_fm_flags & (1u << 1))
 		snprintf(t->mode, sizeof(t->mode), "ANGL");

@@ -1133,6 +1133,14 @@ static void send_variant_request2(int serial_fd) {
 		res = write(serial_fd, buffer, cmdlen);
 	}
 
+	// ArduPilot reports its flight mode only in the craft name; twice a second
+	// so a switch flip shows up promptly.
+	if ((VariantCounter == 6 || VariantCounter == 16) &&
+		strncmp(current_fc_identifier, "ARDU", 4) == 0) {
+		construct_msp_command(buffer, MSP_CMD_NAME, NULL, 0, MSP_OUTBOUND);
+		res = write(serial_fd, buffer, cmdlen);
+	}
+
 	if (rc_channel_mon_enabled &&
 		VariantCounter % 5 == 3) { // once every 5 cycles, about 4 times per second at 20 cycles per second, that is 3, 8, 13, 18
 		construct_msp_command(buffer, MSP_RC, NULL, 0, MSP_OUTBOUND);
