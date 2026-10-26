@@ -25,7 +25,8 @@ static const struct {
 	{MAVLINK_MSG_ID_GPS_RAW_INT, 500000},         /* satellites */
 	{MAVLINK_MSG_ID_SYS_STATUS, 500000},          /* voltage, current, % */
 	{MAVLINK_MSG_ID_BATTERY_STATUS, 1000000},     /* mAh used */
-	{MAVLINK_MSG_ID_RC_CHANNELS, 500000},         /* RSSI */
+	{MAVLINK_MSG_ID_RC_CHANNELS, 500000},         /* RSSI (ArduPilot) */
+	{MAVLINK_MSG_ID_RC_CHANNELS_RAW, 500000},     /* RSSI + channels (Betaflight) */
 	{MAVLINK_MSG_ID_HOME_POSITION, 2000000},      /* home, for distance/bearing */
 };
 
@@ -35,7 +36,18 @@ static const struct {
 static uint8_t mav_fc_sysid = 0;   /* 0 until the FC's first heartbeat */
 static uint8_t mav_fc_compid = 0;
 static uint8_t mav_fc_type = 0;    /* MAV_TYPE_* */
+static uint8_t mav_fc_autopilot = MAV_AUTOPILOT_INVALID;
 static uint64_t mav_last_request_ms = 0;
+
+/* Betaflight says MAV_AUTOPILOT_GENERIC, and what custom_mode means depends
+ * on its version. Up to 2025.12 it is APM-OSD compatible (0 STABILIZE, 1
+ * ACRO - ArduCopter's own numbers, which INAV also uses), and the port only
+ * talks: requests are never read. From 2026.6 custom_mode is Betaflight's
+ * own enum, and the port answers MAV_CMD_REQUEST_MESSAGE. So: ask for
+ * AUTOPILOT_VERSION; a calendar version in the reply (year offset in the
+ * top byte - INAV's semantic major is single digit) means the new enum.
+ * -1 not known yet, 0 legacy numbering, 1 Betaflight 2026.6+. */
+static int mav_btfl_calver = -1;
 
 static int32_t mav_home_lat_e7 = 0, mav_home_lon_e7 = 0;
 static int mav_home_valid = 0;
@@ -61,6 +73,16 @@ static const char *mav_copter_mode(uint32_t m)
 		NULL,   "LAND", NULL,   "DRIF", NULL,   "SPRT", "FLIP", "ATUN",
 		"PHLD", "BRAK", "THRW", "AVOI", "GNGP", "SRTL", "FHLD", "FOLL",
 		"ZIGZ", "SYSI", "AROT", "AUTO", "TRTL",
+	};
+	return m < sizeof(names) / sizeof(names[0]) ? names[m] : NULL;
+}
+
+/* Betaflight 2026.6+ custom_mode (bfMavMode_e) -> Betaflight's own OSD
+ * names for those modes. */
+static const char *mav_btfl_mode(uint32_t m)
+{
+	static const char *const names[] = {
+		"ACRO", "STAB", "HOR", "ALTH", "POSH", "AUTO", "RESC", "!FS!",
 	};
 	return m < sizeof(names) / sizeof(names[0]) ? names[m] : NULL;
 }
@@ -92,6 +114,7 @@ static void mav_osd_heartbeat(const mavlink_message_t *msg)
 	mav_fc_sysid = msg->sysid;
 	mav_fc_compid = msg->compid;
 	mav_fc_type = hb.type;
+	mav_fc_autopilot = hb.autopilot;
 	armed = (hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
 
 	const char *name = NULL;
@@ -99,6 +122,15 @@ static void mav_osd_heartbeat(const mavlink_message_t *msg)
 		memcpy(current_fc_identifier, "ARDU", 4);
 		name = mav_is_plane(hb.type) ? mav_plane_mode(hb.custom_mode)
 					     : mav_copter_mode(hb.custom_mode);
+	} else if (hb.autopilot == MAV_AUTOPILOT_GENERIC) {
+		/* Until the version answer, the legacy numbering: right for an
+		 * old Betaflight or INAV, and a new Betaflight answers within a
+		 * tick of its first heartbeat. */
+		if (mav_btfl_calver == 1)
+			name = mav_btfl_mode(hb.custom_mode);
+		else
+			name = mav_is_plane(hb.type) ? mav_plane_mode(hb.custom_mode)
+						     : mav_copter_mode(hb.custom_mode);
 	}
 	if (name)
 		snprintf(last_mav_mode, sizeof(last_mav_mode), "%s", name);
@@ -211,6 +243,32 @@ static void mav_osd_handle(const mavlink_message_t *msg)
 		break;
 	}
 
+	case MAVLINK_MSG_ID_RC_CHANNELS_RAW: {
+		/* Betaflight's only RC message; the channels themselves go to
+		 * channels.sh through msposd.c's own handler. */
+		mavlink_rc_channels_raw_t rc;
+		mavlink_msg_rc_channels_raw_decode(msg, &rc);
+		if (rc.rssi != 255)
+			last_rssi_pct = rc.rssi * 100 / 254;
+		break;
+	}
+
+	case MAVLINK_MSG_ID_AUTOPILOT_VERSION: {
+		mavlink_autopilot_version_t v;
+		mavlink_msg_autopilot_version_decode(msg, &v);
+		if (msg->sysid != mav_fc_sysid ||
+		    mav_fc_autopilot != MAV_AUTOPILOT_GENERIC)
+			break;
+		mav_btfl_calver = (v.flight_sw_version >> 24) >= 20;
+		if (mav_btfl_calver)
+			memcpy(current_fc_identifier, "BTFL", 4);
+		if (verbose)
+			printf("[mav_osd] FC version 0x%08x -> %s mode numbering\n",
+			       (unsigned)v.flight_sw_version,
+			       mav_btfl_calver ? "Betaflight" : "legacy");
+		break;
+	}
+
 	case MAVLINK_MSG_ID_STATUSTEXT: {
 		mavlink_statustext_t st;
 		mavlink_msg_statustext_decode(msg, &st);
@@ -245,6 +303,21 @@ static void mav_osd_request_streams(int fd)
 		int len = mavlink_msg_to_send_buffer(buf, &m);
 		if (write(fd, buf, len) != len && verbose)
 			printf("[mav_osd] stream request write failed\n");
+	}
+
+	/* Which mode numbering a generic autopilot uses (see mav_btfl_calver).
+	 * An FC that never answers - Betaflight up to 2025.12 does not read its
+	 * MAVLink port - simply stays on the legacy numbering. */
+	if (mav_fc_autopilot == MAV_AUTOPILOT_GENERIC && mav_btfl_calver < 0) {
+		mavlink_message_t m;
+		uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+		mavlink_msg_command_long_pack_chan(MAV_OSD_SYSID, MAV_COMP_ID_OSD,
+			MAVLINK_COMM_2, &m, mav_fc_sysid, mav_fc_compid,
+			MAV_CMD_REQUEST_MESSAGE, 0,
+			(float)MAVLINK_MSG_ID_AUTOPILOT_VERSION, 0, 0, 0, 0, 0, 0);
+		int len = mavlink_msg_to_send_buffer(buf, &m);
+		if (write(fd, buf, len) != len && verbose)
+			printf("[mav_osd] version request write failed\n");
 	}
 }
 
