@@ -14,6 +14,7 @@ msposd_star6b0
 msposd_star6e
 msposd_star6c
 msposd
+msposd_x
 msposd_rockchip
 version.h
 serial_monitor.c
@@ -22,4 +23,13 @@ serial_monitor.c
 # blanket *.ini above (upstream uses .ini for machine-local settings).
 !osd/pixel/*.ini
 msposd_fusion_star6e
+# PyInstaller output (gs/pack standalone build)
+/build/
+/dist/
+gs/build/
+gs/dist/
+*.spec.bak
 
+
+.claude/
+AGENTS.md

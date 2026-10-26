@@ -60,7 +60,7 @@ extern char* recording_dir;
 // libevent base main loop
 struct event_base *base = NULL;
 
-int serial_fd = 0;
+int serial_fd = -1;
 int in_sock = 0;
 int MSPUDPPort = 0;
 int MSP_PollRate = 20;
@@ -836,7 +836,7 @@ static void serial_read_cb(struct bufferevent *bev, void *arg) {
 						   "FPS:%u of %u (skipped:%d), AvgFrameLoad ms:%d | %d "
 						   "| %d | \r\n",
 						stat_pckts, stat_msp_msgs, stat_msp_msg_attitude,
-						(stat_attitudeDelay / (stat_msp_msg_attitude + 1)), stat_bytes,
+						(stat_msp_msg_attitude ? stat_attitudeDelay / stat_msp_msg_attitude : 0), stat_bytes,
 						stat_screen_refresh_count, stat_MSP_draw_complete_count,
 						stat_skipped_frames, stat_draw_overlay_1 / stat_screen_refresh_count,
 						stat_draw_overlay_2 / stat_screen_refresh_count,
@@ -847,7 +847,7 @@ static void serial_read_cb(struct bufferevent *bev, void *arg) {
 						   "Recvd:%lu Sent:%u, Screen FPS:%u  MSP_FPS:%u  "
 						   "MSP_UDP_Pckts:%u, AvgFrameLoad ms:%d | %d | \r\n",
 						stat_pckts, stat_msp_msgs, stat_msp_msg_attitude,
-						(stat_attitudeDelay / (stat_msp_msg_attitude + 1)), stat_bytes,
+						(stat_msp_msg_attitude ? stat_attitudeDelay / stat_msp_msg_attitude : 0), stat_bytes,
 						stat_MSPBytesSent, stat_screen_refresh_count, stat_MSP_draw_complete_count,
 						stat_UDP_MSPframes, stat_draw_overlay_1 / stat_screen_refresh_count,
 						stat_draw_overlay_3 / stat_screen_refresh_count);
@@ -859,6 +859,7 @@ static void serial_read_cb(struct bufferevent *bev, void *arg) {
 			stat_bytes = 0;
 			stat_msp_msgs = 0;
 			stat_msp_msg_attitude = 0;
+			stat_attitudeDelay = 0;
 			stat_draw_overlay_1 = 0;
 			stat_draw_overlay_2 = 0;
 			stat_draw_overlay_3 = 0;
@@ -1029,6 +1030,24 @@ static void temp_read(evutil_socket_t sock, short event, void *arg) {
 }
 
 int VariantCounter = 0;
+static bool ReadSerialSimple(int showstat);
+
+static struct event *early_read_tmr = NULL;
+#define EARLY_READ_DELAY_US 15000 // read the FC reply ~10 ms after the attitude request
+
+/**
+ * One-shot UART read fired shortly after an MSP_ATTITUDE request, so the reply
+ * is forwarded within the same tick instead of waiting for the next tick read.
+ * @param sock unused
+ * @param event unused
+ * @param arg unused
+ */
+static void early_read(evutil_socket_t sock, short event, void *arg) {
+	(void)sock;
+	(void)event;
+	(void)arg;
+	ReadSerialSimple(false);
+}
 
 static bool ReadSerialSimple(int showstat) {
 	if (showstat) { // no faster than 1 per second
@@ -1042,7 +1061,7 @@ static bool ReadSerialSimple(int showstat) {
 					   "FPS:%u of %u (skipped:%d), AvgFrameLoad ms:%d | %d | "
 					   "%d | \r\n",
 					stat_pckts, stat_msp_msgs, stat_msp_msg_attitude,
-					(stat_attitudeDelay / (stat_msp_msg_attitude + 1)), stat_bytes,
+					(stat_msp_msg_attitude ? stat_attitudeDelay / stat_msp_msg_attitude : 0), stat_bytes,
 					stat_screen_refresh_count, stat_MSP_draw_complete_count, stat_skipped_frames,
 					stat_draw_overlay_1 / stat_screen_refresh_count,
 					stat_draw_overlay_2 / stat_screen_refresh_count,
@@ -1053,7 +1072,7 @@ static bool ReadSerialSimple(int showstat) {
 					   "MSP_UDP_Pckts:%u, "
 					   "AvgFrameLoad ms:%d | %d | \r\n",
 					stat_pckts, stat_msp_msgs, stat_msp_msg_attitude,
-					(stat_attitudeDelay / (stat_msp_msg_attitude + 1)), stat_bytes,
+					(stat_msp_msg_attitude ? stat_attitudeDelay / stat_msp_msg_attitude : 0), stat_bytes,
 					stat_MSPBytesSent, stat_screen_refresh_count, stat_MSP_draw_complete_count,
 					stat_UDP_MSPframes, stat_draw_overlay_1 / stat_screen_refresh_count,
 					stat_draw_overlay_3 / stat_screen_refresh_count);
@@ -1066,6 +1085,7 @@ static bool ReadSerialSimple(int showstat) {
 		stat_bytes = 0;
 		stat_msp_msgs = 0;
 		stat_msp_msg_attitude = 0;
+		stat_attitudeDelay = 0;
 		stat_draw_overlay_1 = 0;
 		stat_draw_overlay_2 = 0;
 		stat_draw_overlay_3 = 0;
@@ -1113,6 +1133,16 @@ static void send_variant_request2(int serial_fd) {
 
 		if ((VariantCounter % rate_divider == 0))
 			ReadSerialSimple(VariantCounter == 0);
+	}
+
+	// Attitude goes first every tick so the FC answers it ahead of the other replies.
+	// The pixel OSD's horizon and ladder need it even with the AHI off.
+	if (AHI_Enabled || px_osd_active()) {
+		construct_msp_command(buffer, MSP_ATTITUDE, NULL, 0, MSP_OUTBOUND);
+		res = write(serial_fd, buffer, cmdlen);
+		last_MSP_ATTITUDE = get_time_ms();
+		if (early_read_tmr) // one early read to catch the reply before the next tick
+			evtimer_add(early_read_tmr, &(struct timeval){.tv_usec = EARLY_READ_DELAY_US});
 	}
 
 	// Sending several request right one after another does not work well on INAV ...
@@ -1175,14 +1205,9 @@ static void send_variant_request2(int serial_fd) {
 			construct_msp_command(buffer, MSP_ALTITUDE, NULL, 0, MSP_OUTBOUND);
 			res = write(serial_fd, buffer, cmdlen);
 		}
-		
 
-		// usleep(20000); //never sleep, this hangs the whole app
-		if ( VariantCounter >-1 /*VariantCounter%2==1*/ ){//Every frame
-			construct_msp_command(buffer, MSP_ATTITUDE, NULL, 0, MSP_OUTBOUND);
-			res = write(serial_fd, buffer, cmdlen);
-			last_MSP_ATTITUDE = get_time_ms();
-		}		
+		/* Attitude is requested at the start of the tick (upstream #104);
+		 * the slower telemetry the pixel OSD adds stays here. */
 
 		/* Battery and RSSI change slowly; twice a second is plenty and keeps
 		 * the serial link free for attitude, which drives the horizon. */
@@ -1231,7 +1256,7 @@ static void poll_msp(evutil_socket_t sock, short event, void *arg) {
 
 static int handle_data(const char *port_name, int baudrate, const char *out_addr) {
 	struct event *sig_int = NULL, *in_ev = NULL, *temp_tmr = NULL, *msp_tmr = NULL;
-	struct event *sig_term;
+	struct event *sig_term = NULL;
 	int ret = EXIT_SUCCESS;
 
 	// Read from UDP
@@ -1265,6 +1290,10 @@ static int handle_data(const char *port_name, int baudrate, const char *out_addr
 		evutil_make_socket_nonblocking(serial_fd);
 		printf("Listening UART on %s...\n", port_name);
 	}
+
+	// In UDP mode there is no UART; do not apply raw termios settings to stdin.
+	if (serial_fd < 0)
+		goto uart_configured;
 
 	struct termios options;
 	tcgetattr(serial_fd, &options);
@@ -1302,6 +1331,8 @@ static int handle_data(const char *port_name, int baudrate, const char *out_addr
 		msp_set_vtx_config(serial_fd);
 	}
 
+uart_configured:
+
 	if (strlen(out_addr) > 1) {
 		out_sock = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -1329,7 +1360,7 @@ static int handle_data(const char *port_name, int baudrate, const char *out_addr
 	// Test inject a simple packet to test malvink communication Camera to Ground
 	signal(SIGUSR1, sendtestmsg);
 
-	if (serial_fd > 0 && !enable_simple_uart) { // if UART opened and we need to read it via events
+	if (serial_fd >= 0 && !enable_simple_uart) { // if UART opened and we need to read it via events
 		serial_bev = bufferevent_socket_new(base, serial_fd, 0);
 
 		// Trigger the read callback only whenever there is at least 16 bytes of data in the buffer.
@@ -1404,7 +1435,7 @@ static int handle_data(const char *port_name, int baudrate, const char *out_addr
 
 	// MSP_PollRate
 	if (ParseMSP && msp_tmr == NULL &&
-		serial_fd > 0) { // Only if we are on Cam, on ground no need to poll
+		serial_fd >= 0) { // Only if we are on Cam, on ground no need to poll
 		msp_tmr = event_new(base, -1, EV_PERSIST, poll_msp, &serial_fd);
 		// Set poll interval to 50 milliseconds if pollrate is 20
 		struct timeval interval = {
@@ -1414,6 +1445,9 @@ static int handle_data(const char *port_name, int baudrate, const char *out_addr
 
 		evtimer_add(msp_tmr, &interval /*(struct timeval){.tv_sec = 1}*/
 			/*&(struct timeval){.tv_usec = 5000000}*/);
+
+		if (enable_simple_uart && (AHI_Enabled || px_osd_active())) // early read only when attitude is polled
+			early_read_tmr = evtimer_new(base, early_read, NULL);
 	}
 
 	// MAVLink mode has no MSP poll to drive the pixel OSD; this timer redraws
@@ -1431,6 +1465,10 @@ err:
 		event_del(temp_tmr);
 		event_free(temp_tmr);
 	}
+	if (early_read_tmr) {
+		event_del(early_read_tmr);
+		event_free(early_read_tmr);
+	}
 	if (out_sock > 0)
 		close(out_sock);
 
@@ -1447,13 +1485,15 @@ err:
 
 	if (sig_int)
 		event_free(sig_int);
+	if (sig_term)
+		event_free(sig_term);
+
+	CloseMSP();
 
 	if (base)
 		event_base_free(base);
 
 	libevent_global_shutdown();
-
-	CloseMSP();
 
 	return ret;
 }
