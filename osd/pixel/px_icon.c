@@ -35,27 +35,43 @@ int px_icon_width(int h, PxIconKind kind)
 	return kind == PX_ICON_NONE ? 0 : h; /* the emoji cell is square */
 }
 
-static void blit(const PxCanvas *c, const uint8_t *bm, int x, int y, int w,
-	int h)
+static uint8_t sample(const uint8_t *bm, int tx, int ty, int w, int h)
 {
 	const int S = PX_ICON_BM_SIZE;
-	for (int ty = 0; ty < h; ty++) {
-		int sy = (ty * S) / h;
-		const uint8_t *row = bm + sy * (S / 2);
+	int sx = (tx * S) / w, sy = (ty * S) / h;
+	uint8_t b = bm[sy * (S / 2) + (sx >> 1)];
+	return (sx & 1) ? (b & 0x0F) : (b >> 4);
+}
+
+/* The icon over a ring of `edge` (see px_text_set_outline): the same reason
+ * text has one - a light icon over a light sky is otherwise gone. The ring is
+ * painted first and the icon over it, so only the outside shows. */
+static void blit(const PxCanvas *c, const uint8_t *bm, int x, int y, int w,
+	int h, uint8_t edge)
+{
+	int r = px_text_outline();
+	if (edge != PX_TRANSPARENT && r > 0) {
+		for (int ty = 0; ty < h; ty++)
+			for (int tx = 0; tx < w; tx++) {
+				if (sample(bm, tx, ty, w, h) == PX_TRANSPARENT)
+					continue;
+				for (int dy = -r; dy <= r; dy++)
+					for (int dx = -r; dx <= r; dx++)
+						if (dx * dx + dy * dy <= r * r + r)
+							px_set(c, x + tx + dx, y + ty + dy, edge);
+			}
+	}
+	for (int ty = 0; ty < h; ty++)
 		for (int tx = 0; tx < w; tx++) {
-			int sx = (tx * S) / w;
-			uint8_t b = row[sx >> 1];
-			uint8_t idx = (sx & 1) ? (b & 0x0F) : (b >> 4);
+			uint8_t idx = sample(bm, tx, ty, w, h);
 			if (idx != PX_TRANSPARENT)
 				px_set(c, x + tx, y + ty, idx);
 		}
-	}
 }
 
 int px_icon(const PxCanvas *c, int x, int y, int h, PxIconKind kind,
 	uint8_t color, uint8_t edge)
 {
-	(void)edge; /* the bitmap brings its own colours */
 	if (!c || h < 6)
 		return 0;
 	if (kind == PX_ICON_PROP) {
@@ -84,8 +100,7 @@ int px_icon(const PxCanvas *c, int x, int y, int h, PxIconKind kind,
 		px_arc(c, cx, cy, L, 110.0f, 160.0f, color);
 		px_arc(c, cx, cy, L, 290.0f, 340.0f, color);
 		int tw = px_text_width("RPM", ts);
-		px_text(c, x + (h - tw) / 2, y + h, "RPM", ts, color,
-			PX_TRANSPARENT);
+		px_text(c, x + (h - tw) / 2, y + h, "RPM", ts, color, edge);
 		return h;
 	}
 	const uint8_t *bm = icon_bits(kind);
@@ -98,14 +113,13 @@ int px_icon(const PxCanvas *c, int x, int y, int h, PxIconKind kind,
 		int ts = h - bars;
 		if (ts < 8)
 			ts = 8; /* below this the TTF quantises to noise */
-		blit(c, bm, x + (h - bars) / 2, y, bars, bars);
+		blit(c, bm, x + (h - bars) / 2, y, bars, bars, edge);
 		int tw = px_text_width("RSSI", ts);
-		px_text(c, x + (h - tw) / 2, y + h, "RSSI", ts, color,
-			PX_TRANSPARENT);
+		px_text(c, x + (h - tw) / 2, y + h, "RSSI", ts, color, edge);
 		return h;
 	}
-	(void)color;
-	blit(c, bm, x, y, h, h);
+	(void)color; /* the bitmap brings its own colours */
+	blit(c, bm, x, y, h, h, edge);
 	return h;
 }
 

@@ -206,6 +206,7 @@ int px_layout_load(PxLayout *l, const char *path)
 	/* Layer 0 only, so a layout that never mentions layers behaves
 	 * exactly as it did before this existed. */
 	l->layer_mask = 0x01;
+	l->outline = -1;
 	snprintf(l->font, sizeof(l->font),
 		"/usr/share/fonts/truetype/UbuntuMono-Regular.ttf");
 
@@ -285,6 +286,13 @@ int px_layout_load(PxLayout *l, const char *path)
 				else
 					fprintf(stderr, "[px_layout] layer_channel %s out of"
 						" range (0..16)\n", val);
+			} else if (!strcmp(key, "outline")) {
+				int o = atoi(val);
+				if (o >= 0 && o <= 4)
+					l->outline = o;
+				else
+					fprintf(stderr, "[px_layout] outline %s out of"
+						" range (0..4)\n", val);
 			} else {
 				fprintf(stderr, "[px_layout] [osd]: unknown key '%s'\n",
 					key);

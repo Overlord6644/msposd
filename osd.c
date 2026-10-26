@@ -2378,6 +2378,8 @@ int px_osd_load_layout(const char *path)
 		fprintf(stderr, "[px_osd] layout loaded but font %s is missing;"
 			" text widgets will not draw\n", g_px_layout.font);
 	}
+	if (g_px_layout.outline >= 0)
+		px_text_set_outline(g_px_layout.outline);
 	g_px_layout_loaded = 1;
 	return 0;
 }

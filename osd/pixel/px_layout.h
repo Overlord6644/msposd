@@ -129,6 +129,9 @@ typedef struct {
 	/* RC channel (1..16) whose stick position picks the layer, 0 = off. Three
 	 * positions map to layers 0/1/2, which is what a three-way switch gives. */
 	int      layer_channel;
+	/* Outline around text and icons in pixels (px_text_set_outline), -1 =
+	 * not set in the file, keep the built-in default. */
+	int      outline;
 } PxLayout;
 
 /* Layouts are authored against this height; `scale = auto' is canvas_h / this. */

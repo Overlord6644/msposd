@@ -29,6 +29,12 @@ int px_font_ready(void);
 int px_text(const PxCanvas *c, int x, int y, const char *text, int size_px,
 	uint8_t color, uint8_t edge);
 
+/* Outline thickness in pixels around every glyph, in the `edge` colour
+ * (0..4, default 2; 0 leaves only the anti-aliasing edge). Changing it
+ * flushes the glyph cache. Icons use the same thickness. */
+void px_text_set_outline(int px);
+int px_text_outline(void);
+
 /* Advance width of `text` at `size_px`, without drawing. */
 int px_text_width(const char *text, int size_px);
 

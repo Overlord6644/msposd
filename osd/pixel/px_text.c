@@ -35,6 +35,18 @@ static double g_cap_k = 1.0;
 #define PX_COV_BODY 150 /* >= this -> body colour   */
 #define PX_COV_EDGE 24  /* >= this -> edge colour   */
 
+/* That free edge is not enough on its own. A face drawn for OSDs has crisp
+ * edges, so there are few partly covered pixels and the "outline" comes out
+ * one pixel thin and full of holes; and the canvas is burnt into the video
+ * before encoding, where 4:2:0 chroma and a few Mbit/s smear a 1 px edge
+ * away. White text over sky then vanishes. So every glyph also gets a real
+ * ring: its ink dilated by this many pixels (a disc, so corners stay round),
+ * painted in the edge colour under the body. It is built once per cached
+ * glyph, so the steady-state cost stays one blit. 0 = the old behaviour. */
+#define PX_OUTLINE_DEFAULT 2
+#define PX_OUTLINE_MAX 4
+static int g_outline = PX_OUTLINE_DEFAULT;
+
 /* Rendering one glyph at a time into a scratch bitmap avoids allocating a
  * full-string surface. 128x128 covers sizes well past anything readable at
  * 1080p; larger requests are clamped rather than truncated silently. */
@@ -58,6 +70,7 @@ typedef struct {
 	SFT_Glyph gid;
 	int       size;         /* requested size_px; 0 = slot empty */
 	int       w, h;         /* coverage bitmap, w*h bytes; w==0 for blank */
+	int       pad;          /* outline margin on every side of the glyph */
 	int       yoff;         /* gm.yOffset */
 	double    lsb;          /* leftSideBearing */
 	double    adv;          /* advanceWidth */
@@ -65,6 +78,7 @@ typedef struct {
 	 * rectangle covers only real pixels; wi < 0 when the glyph is blank. */
 	int       ix0, iy0, ix1, iy1;
 	uint8_t  *cov;
+	uint8_t  *ring;         /* 1 where the outline goes; NULL without one */
 } PxGlyphSlot;
 
 static PxGlyphSlot g_gc[PX_GC_SLOTS];
@@ -73,9 +87,58 @@ static void gc_flush(void)
 {
 	for (int i = 0; i < PX_GC_SLOTS; i++) {
 		free(g_gc[i].cov);
+		free(g_gc[i].ring);
 		g_gc[i].cov = NULL;
+		g_gc[i].ring = NULL;
 		g_gc[i].size = 0;
 	}
+}
+
+void px_text_set_outline(int px)
+{
+	if (px < 0)
+		px = 0;
+	if (px > PX_OUTLINE_MAX)
+		px = PX_OUTLINE_MAX;
+	if (px != g_outline) {
+		g_outline = px;
+		gc_flush(); /* every cached glyph carries the old ring */
+	}
+}
+
+int px_text_outline(void)
+{
+	return g_outline;
+}
+
+/* The ring for a padded coverage bitmap: pixels within `r` of ink that are
+ * not body themselves. */
+static uint8_t *make_ring(const uint8_t *cov, int w, int h, int r)
+{
+	uint8_t *ring = calloc((size_t)w * (size_t)h, 1);
+	if (!ring)
+		return NULL;
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			if (cov[(size_t)y * w + x] < PX_COV_EDGE)
+				continue;
+			for (int dy = -r; dy <= r; dy++) {
+				int yy = y + dy;
+				if (yy < 0 || yy >= h)
+					continue;
+				for (int dx = -r; dx <= r; dx++) {
+					int xx = x + dx;
+					if (xx < 0 || xx >= w || dx * dx + dy * dy > r * r + r)
+						continue;
+					ring[(size_t)yy * w + xx] = 1;
+				}
+			}
+		}
+	}
+	for (size_t i = 0; i < (size_t)w * h; i++)
+		if (cov[i] >= PX_COV_BODY)
+			ring[i] = 0;
+	return ring;
 }
 
 int px_font_load(const char *path)
@@ -140,6 +203,7 @@ static PxGlyphSlot *gc_get(const SFT *sft, SFT_Glyph gid, int size_px)
 	if (sft_gmetrics(sft, gid, &gm) < 0)
 		return NULL;
 	free(s->cov);
+	free(s->ring);
 	memset(s, 0, sizeof(*s));
 	s->gid = gid;
 	s->size = size_px;
@@ -162,6 +226,25 @@ static PxGlyphSlot *gc_get(const SFT *sft, SFT_Glyph gid, int size_px)
 		free(cov);
 		return s;
 	}
+	/* Room for the ring on every side: the bitmap grows by the outline and
+	 * the draw position moves back by it (px_text uses s->pad). */
+	int pad = g_outline;
+	if (pad > 0) {
+		int pw = gw + 2 * pad, ph = gh + 2 * pad;
+		uint8_t *pcov = calloc((size_t)pw * (size_t)ph, 1);
+		if (pcov) {
+			for (int y = 0; y < gh; y++)
+				memcpy(pcov + (size_t)(y + pad) * pw + pad,
+				       cov + (size_t)y * gw, (size_t)gw);
+			free(cov);
+			cov = pcov;
+			gw = pw;
+			gh = ph;
+			s->pad = pad;
+			/* NULL on no memory: the glyph then draws without one */
+			s->ring = make_ring(cov, gw, gh, pad);
+		}
+	}
 	s->cov = cov;
 	s->w = gw;
 	s->h = gh;
@@ -170,8 +253,9 @@ static PxGlyphSlot *gc_get(const SFT *sft, SFT_Glyph gid, int size_px)
 	int x0 = gw, y0 = gh, x1 = -1, y1 = -1;
 	for (int y = 0; y < gh; y++) {
 		const uint8_t *row = cov + (size_t)y * gw;
+		const uint8_t *rrow = s->ring ? s->ring + (size_t)y * gw : NULL;
 		for (int x = 0; x < gw; x++)
-			if (row[x] >= PX_COV_EDGE) {
+			if (row[x] >= PX_COV_EDGE || (rrow && rrow[x])) {
 				if (x < x0) x0 = x;
 				if (x > x1) x1 = x;
 				if (y < y0) y0 = y;
@@ -211,14 +295,17 @@ static void gc_blit(const PxCanvas *c, int ox, int oy, const PxGlyphSlot *s,
 		}
 	}
 	for (int y = y0; y <= y1; y++) {
-		const uint8_t *crow = s->cov + (size_t)(y - oy) * s->w + (x0 - ox);
+		size_t off = (size_t)(y - oy) * s->w + (x0 - ox);
+		const uint8_t *crow = s->cov + off;
+		const uint8_t *rrow = s->ring ? s->ring + off : NULL;
 		uint8_t *row = c->data + (size_t)y * c->stride;
 		for (int x = x0; x <= x1; x++, crow++) {
 			uint8_t cv = *crow;
 			uint8_t col;
+			int in_ring = rrow && rrow[x - x0];
 			if (cv >= PX_COV_BODY)
 				col = color;
-			else if (cv >= PX_COV_EDGE && edge != PX_TRANSPARENT)
+			else if ((cv >= PX_COV_EDGE || in_ring) && edge != PX_TRANSPARENT)
 				col = edge;
 			else
 				continue;
@@ -325,8 +412,8 @@ int px_text(const PxCanvas *c, int x, int y, const char *text, int size_px,
 		if (!gs)
 			continue;
 		if (gs->cov) {
-			int ox = (int)(pen + gs->lsb + 0.5);
-			int oy = y + gs->yoff;
+			int ox = (int)(pen + gs->lsb + 0.5) - gs->pad;
+			int oy = y + gs->yoff - gs->pad;
 			gc_blit(c, ox, oy, gs, color, edge);
 		}
 		pen += gs->adv;
