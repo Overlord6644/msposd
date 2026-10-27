@@ -13,6 +13,33 @@ static void label(const PxCanvas *c, int cx, int y, const char *s, int size,
 	px_text(c, cx - w / 2, y, s, size, color, edge);
 }
 
+/* The 1 px dark halo under a thin graduation line, the same job the text
+ * outline does: a white tick on white sky is otherwise invisible. Where lines
+ * meet (ticks on a spine), every halo goes down BEFORE any line, or one
+ * element's halo cuts a notch into its neighbour. */
+static void edge_hline(const PxCanvas *c, int x0, int x1, int y, uint8_t edge)
+{
+	if (edge == PX_TRANSPARENT)
+		return;
+	if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+	px_fill_rect(c, x0 - 1, y - 1, x1 + 1, y + 1, edge);
+}
+
+static void edge_vline(const PxCanvas *c, int x, int y0, int y1, uint8_t edge)
+{
+	if (edge == PX_TRANSPARENT)
+		return;
+	if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+	px_fill_rect(c, x - 1, y0 - 1, x + 1, y1 + 1, edge);
+}
+
+static void edge_line(const PxCanvas *c, int x0, int y0, int x1, int y1,
+	uint8_t edge)
+{
+	if (edge != PX_TRANSPARENT)
+		px_line_thick(c, x0, y0, x1, y1, 3, edge);
+}
+
 void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 	float span_deg, float step_deg, int text_size, uint8_t color,
 	uint8_t accent, uint8_t edge)
@@ -47,8 +74,9 @@ void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 		/* All eight winds get a name, not just the four cardinals: at a
 		 * glance NW is a direction, 315 is arithmetic. */
 		int named = (deg % 45) == 0;
-		px_vline(&rib, x, tick_top, tick_top + (named ? tick_major : tick_len),
-			color);
+		int tick_end = tick_top + (named ? tick_major : tick_len);
+		edge_vline(&rib, x, tick_top, tick_end, edge);
+		px_vline(&rib, x, tick_top, tick_end, color);
 		if (named) {
 			static const char *n[] = {"N", "NE", "E", "SE", "S", "SW",
 				"W", "NW"};
@@ -114,6 +142,15 @@ void px_hud_tape(const PxCanvas *c, int x, int y, int h, float value,
 	 * changes - the movement is the reading. */
 	float first = value - span / 2.0f;
 	float start = floorf(first / step) * step;
+	/* Halos of the spine and every tick first, then the white on top: the
+	 * ticks join the spine, see edge_hline. */
+	edge_vline(&tape, x, y, y + h, edge);
+	for (float v = start; v <= value + span / 2.0f + step; v += step) {
+		int ty = cy - (int)lrintf((v - value) * px_per_unit);
+		int major = (fmodf(fabsf(v), step * 2.0f) < step * 0.5f);
+		edge_hline(&tape, x, x + dir * (major ? tick_long : tick_short), ty,
+			edge);
+	}
 	for (float v = start; v <= value + span / 2.0f + step; v += step) {
 		int ty = cy - (int)lrintf((v - value) * px_per_unit);
 		/* Label every other tick: at typical spans, labelling all of them
@@ -242,15 +279,20 @@ void px_hud_ladder(const PxCanvas *c, int cx, int cy, int w, int h,
 			continue;
 		}
 
-		px_line(c, x0, y0, ix0, iy0, col);
-		px_line(c, ix1, iy1, x1, y1, col);
-
 		/* Perpendicular tick at the INNER end, pointing back toward the
 		 * horizon: on a graduation above you it hangs down, below you it stands
 		 * up, so which side of level you are on is readable without finding the
 		 * sign of the label. */
 		int tick = (d > 0) ? 9 : -9;
 		int tx = (int)lrintf(sa * tick), ty = (int)lrintf(ca * tick);
+
+		edge_line(c, x0, y0, ix0, iy0, edge);
+		edge_line(c, ix1, iy1, x1, y1, edge);
+		edge_line(c, ix0, iy0, ix0 + tx, iy0 + ty, edge);
+		edge_line(c, ix1, iy1, ix1 + tx, iy1 + ty, edge);
+
+		px_line(c, x0, y0, ix0, iy0, col);
+		px_line(c, ix1, iy1, x1, y1, col);
 		px_line(c, ix0, iy0, ix0 + tx, iy0 + ty, col);
 		px_line(c, ix1, iy1, ix1 + tx, iy1 + ty, col);
 
@@ -278,6 +320,10 @@ void px_hud_crosshair(const PxCanvas *c, int cx, int cy, int size,
 	 * more cue for which way is down. The ring keeps the exact centre visible
 	 * against both sky and ground without a solid mass hiding what the
 	 * aircraft points at. */
+	/* Spike halos before the ring: they reach its edge and would notch it. */
+	edge_vline(c, cx, cy - arm - 4, cy - r - 1, edge);
+	edge_hline(c, cx - arm - 4, cx - r - 1, cy, edge);
+	edge_hline(c, cx + r + 1, cx + arm + 4, cy, edge);
 	if (edge != PX_TRANSPARENT) {
 		px_circle(c, cx, cy, r + 1, edge);   /* dark halo, for light ground */
 		px_circle(c, cx, cy, r - 1, edge);
