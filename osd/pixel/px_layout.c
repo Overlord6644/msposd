@@ -509,6 +509,17 @@ static void draw_bar(const PxWidget *w, const PxCanvas *c, const PxTelemetry *t)
 	int width = w->w > 0 ? w->w : 200;
 	int height = w->h > 0 ? w->h : 18;
 	uint8_t col = threshold_color(w, t, w->color);
+	/* A light 1 px frame vanishes on white sky: sandwich it between black,
+	 * outside and inside, as the text outline does. The fill then paints over
+	 * the inner line where the bar is full - green against the frame needs no
+	 * help. */
+	if (px_text_outline() > 0 && w->edge != PX_TRANSPARENT &&
+	    w->edge != PX_BLACK) {
+		px_rect(c, w->x - 1, w->y - 1, w->x + width + 1, w->y + height + 1, 1,
+			PX_BLACK);
+		px_rect(c, w->x + 1, w->y + 1, w->x + width - 1, w->y + height - 1, 1,
+			PX_BLACK);
+	}
 	if (w->fill != PX_TRANSPARENT)
 		px_fill_rect(c, w->x, w->y, w->x + width, w->y + height, w->fill);
 	int filled = (int)((float)(width - 2) * frac);
