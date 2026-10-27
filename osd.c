@@ -3206,6 +3206,18 @@ static void draw_screenBMP2(bool OnlyAHI) {
 		// glyph base and, on x86, points cr at this frame) and before the overlays.
 		// heading orients the plane icon; ground course drives the lead/rotation.
 		// The map paints here only when [map] on_top=0.
+		//
+		// [map] show_on_start = 1 shows it without the 'g' key: on the goggles
+		// (Rockchip, msposd behind PixelPilot) there is no keyboard to press it.
+		{
+			static bool map_autoshow_done = false;
+			int v;
+			if (!map_autoshow_done) {
+				map_autoshow_done = true;
+				if (map_config_enabled() && ReadIniInt("map", "show_on_start", &v) && v)
+					map_toggle_enabled();
+			}
+		}
 		DrawMap(last_lat, last_lon, last_heading, last_groundCourse, last_speed, /*over_phase=*/false);
 
 		if (AHI_Enabled == 2)

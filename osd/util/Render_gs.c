@@ -121,8 +121,10 @@ cairo_t *cr_back = NULL;
 
 extern bool verbose;
 
-#if defined(_x86)
+/* used by the Rockchip build too (the AHI and ladder), so outside _x86 */
 void rotate_point(Point original, Point img_center, double angle_degrees, Point *rotated);
+
+#if defined(_x86)
 
 /*
  * Suppress X key autorepeat for single-action hotkeys. A held key emits repeated
