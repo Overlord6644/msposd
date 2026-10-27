@@ -442,6 +442,28 @@ static void capture_home_if_pending(void) {
 	}
 }
 
+/* A provisional home before arming, so the map has one on the ground: placed
+ * once the craft has a fix with 5+ satellites, re-placed when it is carried
+ * more than 15 m, and replaced by the real one at arming (above). Same rule as
+ * pcpilot's map, so the goggles and the PC agree. */
+static void provisional_home(void) {
+	static bool placed = false;
+	static int32_t plat = 0, plon = 0;
+	double dla, dlo;
+
+	if (!gs_mode_active() || armed || !current_gps_valid() || last_numSat < 5)
+		return;
+	dla = (last_lat - plat) / 1e7 * 111320.0;
+	dlo = (last_lon - plon) / 1e7 * 111320.0 * cos(plat / 1e7 * M_PI / 180.0);
+	if (placed && dla * dla + dlo * dlo <= 15.0 * 15.0)
+		return;
+	if (write_gs_home_state()) {
+		placed = true;
+		plat = last_lat;
+		plon = last_lon;
+	}
+}
+
 static void update_gs_home_capture(bool was_armed, bool now_armed) {
 	if (!gs_mode_active()) {
 		gs_home_pending = false;
@@ -988,6 +1010,7 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 			terrain_agl_update_gps(last_lat / 10000000.0, last_lon / 10000000.0,
 				(double)last_altitude, current_gps_valid(), get_time_ms());
 		capture_home_if_pending();
+		provisional_home();
 #endif
 		//last_groundCourse = last_heading + stat_msp_ttl%90 -45; //Simulate offset 
 		break;
