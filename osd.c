@@ -912,8 +912,11 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		//trace_fragment(false);
 		if (out_sock > 0 && fb_cursor > 0) { // if there is data to send		
 			//If AHI is enabled, wee need to flush faster to make it responsive. 	
-			// Immediately send AHI message if we draw custom Artificial horizon 
-			if ((AHI_Enabled>0)  // we favour low-latency over efficiency 
+			// Immediately send AHI message if we draw custom Artificial horizon
+			// The pixel OSD polls telemetry instead of taking DisplayPort, so no
+			// DRAW_SCREEN ever comes to flush the buffer: without this the
+			// ground (moving map) got MSP only when the buffer overflowed.
+			if ((AHI_Enabled>0 || px_osd_active())  // we favour low-latency over efficiency
 				/* && (get_time_ms() - LastPcktSent) > (MinTimeBetweenScreenRefresh/5)*/) {
 				trace_fragment(false);
 				stat_UDP_MSPframes++;
