@@ -29,6 +29,7 @@ static void map_zoom_step(int dir);
 static void map_follow_cycle(void);
 static void map_switch_file(void);
 static int  map_is_shown(void);
+static void map_live_check(void);
 uint64_t get_time_ms(void);   // defined later in osd.c; used by the throttled OSD raise
 // #include <cairo/cairo.h>
 // #include <cairo/cairo-xlib.h>
@@ -946,6 +947,8 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		 * freeze on its first frame. Redraw on attitude, held to -r. */
 		else if (DrawOSD && map_is_shown())
 			draw_screenBMP();
+		else if (DrawOSD)
+			map_live_check();   /* hidden: still follow the ini and the pack */
 #endif
 
 		// printf("\n Got MSG_ATTITUDE            pitch:%d  roll:%d\n", pitch,
@@ -1379,6 +1382,72 @@ static void AHI_FilterUpdate(AhiFilterState *st,
 #include "osd/util/poi_osd.c"   // POI direction markers (GS rendering only)
 #include "osd/util/map_render.c" // Offline moving-map overlay (GS rendering only)
 static int map_is_shown(void) { return map_shown; }
+/* [map] live control for a ground station without a keyboard (the goggles):
+ * the first call shows the map per show_on_start, later ones (at most once a
+ * second) follow msposd.ini and the pack file. Called on every redraw, and on
+ * attitude while the map is hidden - nothing redraws then. */
+static void map_live_check(void) {
+	static bool map_autoshow_done = false;
+	static struct timespec map_ini_mtime = {0, 0};
+	static uint64_t map_ini_checked = 0;
+	int v;
+	if (!map_autoshow_done) {
+		struct stat st;
+		char p[600];
+		map_autoshow_done = true;
+		snprintf(p, sizeof(p), "%s/msposd.ini", exe_dir());
+		if (stat(p, &st) == 0)
+			map_ini_mtime = st.st_mtim;
+		if (map_config_enabled() && ReadIniInt("map", "show_on_start", &v) && v)
+			map_toggle_enabled();
+	} else if (get_time_ms() - map_ini_checked >= 1000) {
+		struct stat st;
+		char p[600];
+		map_ini_checked = get_time_ms();
+		snprintf(p, sizeof(p), "%s/msposd.ini", exe_dir());
+		/* nanoseconds: two presses in the same second are two changes */
+		if (stat(p, &st) == 0 && (st.st_mtim.tv_sec != map_ini_mtime.tv_sec ||
+		                          st.st_mtim.tv_nsec != map_ini_mtime.tv_nsec)) {
+			char old_pack[sizeof(map_mbtiles)];
+			bool want;
+			map_ini_mtime = st.st_mtim;
+			snprintf(old_pack, sizeof(old_pack), "%s", map_mbtiles);
+			map_read_config();
+			if (strcmp(old_pack, map_mbtiles) != 0)
+				map_close_db();
+			want = ReadIniInt("map", "show_on_start", &v) && v;
+			if (want != (map_shown != 0))
+				map_toggle_enabled();
+			map_r_z = -1;              /* size/follow may have moved */
+		}
+		/* The pack itself. A ground station that copies packs in
+		 * (the goggles' map_sync from pcpilot) replaces the file
+		 * under us: reopen it, or the old one stays open and its
+		 * missing tiles stay missing. A configured pack that does not
+		 * exist yet falls back to the first one in its folder, and a
+		 * map that had nothing to show shows itself once a pack is
+		 * there - unless show_on_start says hidden. */
+		{
+			static ino_t pack_ino = 0;
+			static struct timespec pack_mtime = {0, 0};
+			struct stat ps;
+			if (stat(map_mbtiles, &ps) != 0) {
+				map_read_config();
+			} else {
+				if (ps.st_ino != pack_ino || ps.st_mtim.tv_sec != pack_mtime.tv_sec ||
+					ps.st_mtim.tv_nsec != pack_mtime.tv_nsec) {
+					if (pack_ino != 0)
+						map_close_db();
+					pack_ino = ps.st_ino;
+					pack_mtime = ps.st_mtim;
+				}
+				if (!map_shown && map_config_enabled() &&
+					ReadIniInt("map", "show_on_start", &v) && v)
+					map_toggle_enabled();
+			}
+		}
+	}
+}
 #endif
 
 /// @brief Ugly implementation. To do : clear from bmp format dependant code
@@ -3227,42 +3296,7 @@ static void draw_screenBMP2(bool OnlyAHI) {
 		// The goggles' menu and buttons change msposd.ini instead, so it is
 		// re-read when it changes: size, opacity, follow mode, and
 		// show_on_start as the live show/hide.
-		{
-			static bool map_autoshow_done = false;
-			static struct timespec map_ini_mtime = {0, 0};
-			static uint64_t map_ini_checked = 0;
-			int v;
-			if (!map_autoshow_done) {
-				struct stat st;
-				char p[600];
-				map_autoshow_done = true;
-				snprintf(p, sizeof(p), "%s/msposd.ini", exe_dir());
-				if (stat(p, &st) == 0)
-					map_ini_mtime = st.st_mtim;
-				if (map_config_enabled() && ReadIniInt("map", "show_on_start", &v) && v)
-					map_toggle_enabled();
-			} else if (get_time_ms() - map_ini_checked >= 1000) {
-				struct stat st;
-				char p[600];
-				map_ini_checked = get_time_ms();
-				snprintf(p, sizeof(p), "%s/msposd.ini", exe_dir());
-				/* nanoseconds: two presses in the same second are two changes */
-				if (stat(p, &st) == 0 && (st.st_mtim.tv_sec != map_ini_mtime.tv_sec ||
-				                          st.st_mtim.tv_nsec != map_ini_mtime.tv_nsec)) {
-					char old_pack[sizeof(map_mbtiles)];
-					bool want;
-					map_ini_mtime = st.st_mtim;
-					snprintf(old_pack, sizeof(old_pack), "%s", map_mbtiles);
-					map_read_config();
-					if (strcmp(old_pack, map_mbtiles) != 0)
-						map_close_db();
-					want = ReadIniInt("map", "show_on_start", &v) && v;
-					if (want != (map_shown != 0))
-						map_toggle_enabled();
-					map_r_z = -1;              /* size/follow may have moved */
-				}
-			}
-		}
+		map_live_check();
 		DrawMap(last_lat, last_lon, last_heading, last_groundCourse, last_speed, /*over_phase=*/false);
 
 		if (AHI_Enabled == 2)
