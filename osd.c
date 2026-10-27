@@ -827,16 +827,6 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	stat_msp_msgs++;
 	stat_msp_ttl++;
 
-	// We will forward ALL MSP traffic, not only DisplayPort
-	if (fb_cursor >= sizeof(frame_buffer)) {
-		if (out_sock > 0) {
-			printf("Exhausted frame buffer! Flushing...\n");
-			sendto(
-				out_sock, frame_buffer, fb_cursor, 0, (struct sockaddr *)&sin_out, sizeof(sin_out));
-		}
-		fb_cursor = 0;
-		// return;
-	}
 	// Here it will replace custom text messages for configurator screen
 	if (msp_message->cmd == MSP_CMD_DISPLAYPORT && msp_message->direction == MSP_INBOUND &&
 		msp_message->cmd == MSP_CMD_DISPLAYPORT &&
@@ -846,9 +836,24 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		msp_message->payload[0] == MSP_DISPLAYPORT_DRAW_SYSTEM)
 		InjectSystemElement(msp_message);
 
+	// We will forward ALL MSP traffic, not only DisplayPort
 	// if (out_sock>0){//No need to cache MSP if we won't send it later
 	uint16_t size = msp_data_from_msg(message_buffer, msp_message);
-	copy_to_msp_frame_buffer(message_buffer, size);
+	/* Make room BEFORE copying. This used to test only whether the buffer was
+	 * already full, so a message landing near the end ran past it (12 bytes at
+	 * offset 1022 of 1024). On a ground station, where nothing else empties it,
+	 * that took seconds: FORTIFY aborts, unfortified builds overwrite whatever
+	 * follows the buffer. */
+	if (fb_cursor + size > sizeof(frame_buffer)) {
+		if (out_sock > 0 && fb_cursor > 0) {
+			printf("Exhausted frame buffer! Flushing...\n");
+			sendto(
+				out_sock, frame_buffer, fb_cursor, 0, (struct sockaddr *)&sin_out, sizeof(sin_out));
+		}
+		fb_cursor = 0;
+	}
+	if (size <= sizeof(frame_buffer))
+		copy_to_msp_frame_buffer(message_buffer, size);
 	//}
 
 	switch (msp_message->cmd) {
