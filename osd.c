@@ -3224,13 +3224,43 @@ static void draw_screenBMP2(bool OnlyAHI) {
 		//
 		// [map] show_on_start = 1 shows it without the 'g' key: on the goggles
 		// (Rockchip, msposd behind PixelPilot) there is no keyboard to press it.
+		// The goggles' menu and buttons change msposd.ini instead, so it is
+		// re-read when it changes: size, opacity, follow mode, and
+		// show_on_start as the live show/hide.
 		{
 			static bool map_autoshow_done = false;
+			static struct timespec map_ini_mtime = {0, 0};
+			static uint64_t map_ini_checked = 0;
 			int v;
 			if (!map_autoshow_done) {
+				struct stat st;
+				char p[600];
 				map_autoshow_done = true;
+				snprintf(p, sizeof(p), "%s/msposd.ini", exe_dir());
+				if (stat(p, &st) == 0)
+					map_ini_mtime = st.st_mtim;
 				if (map_config_enabled() && ReadIniInt("map", "show_on_start", &v) && v)
 					map_toggle_enabled();
+			} else if (get_time_ms() - map_ini_checked >= 1000) {
+				struct stat st;
+				char p[600];
+				map_ini_checked = get_time_ms();
+				snprintf(p, sizeof(p), "%s/msposd.ini", exe_dir());
+				/* nanoseconds: two presses in the same second are two changes */
+				if (stat(p, &st) == 0 && (st.st_mtim.tv_sec != map_ini_mtime.tv_sec ||
+				                          st.st_mtim.tv_nsec != map_ini_mtime.tv_nsec)) {
+					char old_pack[sizeof(map_mbtiles)];
+					bool want;
+					map_ini_mtime = st.st_mtim;
+					snprintf(old_pack, sizeof(old_pack), "%s", map_mbtiles);
+					map_read_config();
+					if (strcmp(old_pack, map_mbtiles) != 0)
+						map_close_db();
+					want = ReadIniInt("map", "show_on_start", &v) && v;
+					if (want != (map_shown != 0))
+						map_toggle_enabled();
+					map_r_z = -1;              /* size/follow may have moved */
+				}
 			}
 		}
 		DrawMap(last_lat, last_lon, last_heading, last_groundCourse, last_speed, /*over_phase=*/false);
