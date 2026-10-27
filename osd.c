@@ -15,6 +15,8 @@
 #include "osd/msp/msp.h"
 #include "osd/msp/msp_displayport.h"
 
+void trace_fragment(bool reset);   // msposd.c, which includes this file before defining it
+
 #if defined(_x86) || defined(__ROCKCHIP__)
 #include "osd/util/terrain_agl.h"
 #include "osd/util/terrain_elevation.h"
