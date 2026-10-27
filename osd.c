@@ -28,6 +28,7 @@ static void DrawMap(int32_t lat_e7, int32_t lon_e7, int16_t heading_deg, int16_t
 static void map_zoom_step(int dir);
 static void map_follow_cycle(void);
 static void map_switch_file(void);
+static int  map_is_shown(void);
 uint64_t get_time_ms(void);   // defined later in osd.c; used by the throttled OSD raise
 // #include <cairo/cairo.h>
 // #include <cairo/cairo-xlib.h>
@@ -310,6 +311,7 @@ extern bool DrawOSD;
 // SRT/OSD
 extern bool recording_running;
 static void force_draw_ahi();
+static void draw_screenBMP();
 
 
 static void send_display_size(int serial_fd) {
@@ -933,6 +935,13 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		// This makes the AHI refresh rate low, se we need to redraw it even when there is no complete mspdisplayport frame.
 		if (DrawOSD && (AHI_Enabled>0))
 			force_draw_ahi();//totally wrong approach to call it directly, but nore simple
+#if defined(_x86) || defined(__ROCKCHIP__)
+		/* When the FC's OSD is drawn on the camera (pixel OSD), no DisplayPort
+		 * reaches the ground and nothing else redraws it: the moving map would
+		 * freeze on its first frame. Redraw on attitude, held to -r. */
+		else if (DrawOSD && map_is_shown())
+			draw_screenBMP();
+#endif
 
 		// printf("\n Got MSG_ATTITUDE            pitch:%d  roll:%d\n", pitch,
 		// roll);
@@ -1364,6 +1373,7 @@ static void AHI_FilterUpdate(AhiFilterState *st,
 #if defined(_x86) || defined(__ROCKCHIP__)
 #include "osd/util/poi_osd.c"   // POI direction markers (GS rendering only)
 #include "osd/util/map_render.c" // Offline moving-map overlay (GS rendering only)
+static int map_is_shown(void) { return map_shown; }
 #endif
 
 /// @brief Ugly implementation. To do : clear from bmp format dependant code
