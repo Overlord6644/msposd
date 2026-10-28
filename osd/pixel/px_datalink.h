@@ -36,6 +36,7 @@ typedef struct {
 	int   channel;       /* Ch:165-20mhz    channel number          */
 	int   bandwidth_mhz; /* Ch:165-20mhz    channel width           */
 	int   pubq;          /* q:1745          driver queue metric     */
+	int   heat;          /* REDUCING_HEAT: thermal step-down active */
 	int   have;          /* 1 once anything has been parsed         */
 } PxDatalink;
 

@@ -2951,6 +2951,11 @@ static void px_osd_fill(PxTelemetry *t)
 	px_datalink_parse(&dl, air_unit_info_msg);
 	px_datalink_parse(&dl, osdmsg);   /* /tmp/MSPOSD.msg, the same source */
 	t->dl = dl;
+	/* The character OSD printed aalink's line verbatim, REDUCING_HEAT and
+	 * all; the pixel widgets take only its numbers, so say it here - the
+	 * frame rate is down to 30..5 fps and the pilot should know why. */
+	if (dl.heat && !t->msg[0])
+		snprintf(t->msg, sizeof(t->msg), "REDUCING HEAT");
 	/* Age of the link daemon's report, from the FILE's mtime - not from our
 	 * read clock. The reader above re-reads the file every second whether or
 	 * not the daemon still writes it, and parsed values freeze at their last
