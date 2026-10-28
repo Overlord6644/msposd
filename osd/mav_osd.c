@@ -192,6 +192,15 @@ static void mav_osd_handle(const mavlink_message_t *msg)
 		mavlink_msg_global_position_int_decode(msg, &p);
 		last_lat_e7 = p.lat;
 		last_lon_e7 = p.lon;
+		/* the ground map reads the MSP_RAW_GPS set (osd.c: last_lat/lon,
+		 * last_groundCourse in degrees): fill it too, or the map in the
+		 * goggles never moves with a MAVLink FC */
+#if defined(_x86) || defined(__ROCKCHIP__)
+		last_lat = p.lat;
+		last_lon = p.lon;
+#endif
+		if (p.hdg != UINT16_MAX)
+			last_groundCourse = (int16_t)(p.hdg / 100);   /* cdeg -> deg */
 		last_altitude = (int16_t)(p.relative_alt / 1000);
 		mav_osd_update_home();
 		break;
@@ -201,6 +210,10 @@ static void mav_osd_handle(const mavlink_message_t *msg)
 		mavlink_gps_raw_int_t g;
 		mavlink_msg_gps_raw_int_decode(msg, &g);
 		last_numSat = g.satellites_visible == 255 ? 0 : g.satellites_visible;
+		/* MSP's fix flag, which the map waits for: 2D and better */
+#if defined(_x86) || defined(__ROCKCHIP__)
+		last_gps_fix = g.fix_type >= GPS_FIX_TYPE_2D_FIX;
+#endif
 		break;
 	}
 
