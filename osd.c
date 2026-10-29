@@ -193,6 +193,9 @@ static uint8_t bf_box_bits[16];
 static uint32_t bf_arm_flags = 0;
 static int bf_status_ex_seen = 0;
 static uint8_t last_batt_state = 0xFF;
+/* Box 35 is the crash-flip SWITCH; Betaflight only flips when it arms with
+ * the switch on, and stays so until disarmed: latched at the arm edge. */
+static int bf_crash_flipping = 0;
 
 static int bf_box_on(uint8_t permanent_id)
 {
@@ -924,13 +927,15 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 			}
 		}
 		// we need the armed state
-#if defined(_x86) || defined(__ROCKCHIP__)
 		bool was_armed = armed;
-#endif
 		armed = (msp_message->payload[6] & 0x01);
 		/* Full flight-mode flags, for the pixel OSD's mode widget. */
 		last_fm_flags = *(uint32_t *)&msp_message->payload[6];
 		last_fm_seen = 1;
+		if (armed && !was_armed)
+			bf_crash_flipping = bf_box_count > 0 && bf_box_on(35);
+		if (!armed)
+			bf_crash_flipping = 0;
 #if defined(_x86) || defined(__ROCKCHIP__)
 		update_gs_home_capture(was_armed, armed);
 		if (DrawOSD && AGL_enabled)

@@ -124,17 +124,10 @@ static const char *bf_arm_word(const char *flag)
 	return flag;
 }
 
-/* Box 35 is the crash-flip SWITCH; Betaflight only flips when it arms with
- * the switch on, and stays so until disarmed. Latched at the arm edge. */
+/* Latched in the MSP_STATUS handler (osd.c): see bf_crash_flipping. */
 static int bf_crash_flip(void)
 {
-	static int was_armed, flipping;
-	if (armed && !was_armed)
-		flipping = bf_box_count > 0 && bf_box_on(35);
-	if (!armed)
-		flipping = 0;
-	was_armed = armed;
-	return flipping;
+	return bf_crash_flipping;
 }
 
 /* The MSP data's mode, in Betaflight's own precedence (osdElementFlymode);
