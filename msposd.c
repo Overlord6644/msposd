@@ -731,6 +731,7 @@ static void process_mavlink(uint8_t *buffer, int count, void *arg) {
 		}
 		mavbuf[mavbuff_offset] = buffer[i];
 		mavbuff_offset++;
+		mav_osd_esc_byte(buffer[i]);   /* ArduPilot ESC RPM, outside the dialect */
 		if (mavlink_parse_char(MAVLINK_COMM_0, buffer[i], &message, &status) == 1) {
 			mavpckts_ttl++;
 			system_id = message.sysid;

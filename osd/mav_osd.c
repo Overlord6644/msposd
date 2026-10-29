@@ -28,7 +28,68 @@ static const struct {
 	{MAVLINK_MSG_ID_RC_CHANNELS, 500000},         /* RSSI (ArduPilot) */
 	{MAVLINK_MSG_ID_RC_CHANNELS_RAW, 500000},     /* RSSI + channels (Betaflight) */
 	{MAVLINK_MSG_ID_HOME_POSITION, 2000000},      /* home, for distance/bearing */
+	{11030, 250000},  /* ESC_TELEMETRY_1_TO_4 (ArduPilot): motor RPM, see below */
 };
+
+/* ArduPilot's ESC_TELEMETRY_1_TO_4 (ardupilotmega dialect, id 11030) is not in
+ * the common dialect this build is generated from, so mavlink_parse_char
+ * drops it - its CRC seed is unknown here. A scanner of its own, fed the same
+ * bytes: MAVLink 2 frames only (an ArduPilot that sends 11030 speaks 2), CRC
+ * checked with the message's seed. Wire layout, uint16 arrays first:
+ * voltage[4] current[4] totalcurrent[4] rpm[4] count[4], then temperature[4]. */
+#define MAV_ESC_TLM_1_TO_4 11030
+#define MAV_ESC_TLM_CRC_EXTRA 144
+
+static uint8_t mav_esc_buf[280];
+static unsigned mav_esc_len, mav_esc_need;
+
+static uint16_t mav_esc_x25(uint16_t crc, uint8_t b)
+{
+	uint8_t t = b ^ (uint8_t)(crc & 0xff);
+	t ^= (uint8_t)(t << 4);
+	return (uint16_t)((crc >> 8) ^ ((uint16_t)t << 8) ^ ((uint16_t)t << 3) ^ (t >> 4));
+}
+
+static void mav_esc_frame(const uint8_t *f)
+{
+	unsigned plen = f[1];
+	uint32_t id = (uint32_t)f[7] | (uint32_t)f[8] << 8 | (uint32_t)f[9] << 16;
+	if (id != MAV_ESC_TLM_1_TO_4)
+		return;
+	uint16_t crc = 0xFFFF;
+	for (unsigned i = 1; i < 10 + plen; i++)
+		crc = mav_esc_x25(crc, f[i]);
+	crc = mav_esc_x25(crc, MAV_ESC_TLM_CRC_EXTRA);
+	if (crc != (uint16_t)(f[10 + plen] | f[11 + plen] << 8))
+		return;
+	uint8_t p[44] = {0};   /* MAVLink 2 trims trailing zeros: put them back */
+	memcpy(p, f + 10, plen < sizeof(p) ? plen : sizeof(p));
+	/* average over the ESCs that report (a wing has one), like MSP's */
+	uint32_t sum = 0;
+	int cnt = 0;
+	for (int m = 0; m < 4; m++) {
+		uint16_t rpm = (uint16_t)(p[24 + 2 * m] | p[25 + 2 * m] << 8);
+		uint16_t count = (uint16_t)(p[32 + 2 * m] | p[33 + 2 * m] << 8);
+		if (count || rpm) {
+			sum += rpm;
+			cnt++;
+		}
+	}
+	last_rpm_avg = cnt ? sum / (uint32_t)cnt : 0;
+}
+
+static void mav_osd_esc_byte(uint8_t c)
+{
+	if (mav_esc_len == 0 && c != 0xFD)
+		return;
+	mav_esc_buf[mav_esc_len++] = c;
+	if (mav_esc_len == 3)   /* incompat flags: a signed frame is 13 bytes longer */
+		mav_esc_need = 12 + mav_esc_buf[1] + ((c & 0x01) ? 13 : 0);
+	if (mav_esc_len >= 3 && mav_esc_len >= mav_esc_need) {
+		mav_esc_frame(mav_esc_buf);
+		mav_esc_len = mav_esc_need = 0;
+	}
+}
 
 #define MAV_OSD_SYSID 191 /* onboard companion range; the FC accepts any */
 #define MAV_OSD_REQUEST_PERIOD_MS 5000
@@ -460,11 +521,11 @@ static void mav_osd_dump(void)
 	px_osd_fill(&t);
 	printf("[telem] mode=%s armed=%d roll=%.1f pitch=%.1f hdg=%.0f alt=%.0f "
 	       "spd=%.1fkph vs=%.1f thr=%d volt=%.2f curr=%.2f mah=%d bat=%d%% "
-	       "sats=%d home=%.0fm@%.0f rssi=%d fc_msg[%d]=\"%s\" "
+	       "sats=%d home=%.0fm@%.0f rssi=%d rpm=%.0f fc_msg[%d]=\"%s\" "
 	       "bf: boxes=%d arm_flags=0x%08x batt_state=%d\n",
 	       t.mode, t.armed, t.roll_deg, t.pitch_deg, t.yaw_deg, t.alt_m,
 	       t.spd_kph, t.vspd_ms, t.throttle_pct, t.volt_v, t.curr_a, t.mah_used,
-	       t.batt_pct, t.sats, t.home_dist_m, t.home_bearing_deg, t.rssi_pct,
+	       t.batt_pct, t.sats, t.home_dist_m, t.home_bearing_deg, t.rssi_pct, t.rpm_avg,
 	       t.fc_msg_sev, t.fc_msg, bf_box_count, (unsigned)bf_arm_flags,
 	       last_batt_state);
 }
