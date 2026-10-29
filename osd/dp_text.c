@@ -162,14 +162,10 @@ static int bf_data_warning(char *out, size_t n, int *sev)
 		*sev = MAV_SEVERITY_WARNING;
 		return 1;
 	}
-	if (last_batt_state == 2 || last_batt_state == 1) {
-		snprintf(out, n, last_batt_state == 2 ? "LAND NOW" : "LOW BATTERY");
-		*sev = last_batt_state == 2 ? MAV_SEVERITY_ERROR : MAV_SEVERITY_WARNING;
-		return 1;
-	}
 	/* Every reason at once, whenever it is disarmed - not one at a time with
-	 * the switch on like Betaflight's OSD. ARM_SWITCH only says the switch is
-	 * up while blocked: dropped unless alone, as Betaflight does. */
+	 * the switch on like Betaflight's OSD - and ahead of the battery: on the
+	 * ground, why it will not arm is the question. ARM_SWITCH only says the
+	 * switch is up while blocked: dropped unless alone, as Betaflight does. */
 	uint32_t f = bf_arm_flags;
 	if (!armed && bf_status_ex_seen && f) {
 		if (f != (1u << BF_ARM_SWITCH_BIT))
@@ -187,6 +183,11 @@ static int bf_data_warning(char *out, size_t n, int *sev)
 			first = 0;
 		}
 		*sev = MAV_SEVERITY_WARNING;
+		return 1;
+	}
+	if (last_batt_state == 2 || last_batt_state == 1) {
+		snprintf(out, n, last_batt_state == 2 ? "LAND NOW" : "LOW BATTERY");
+		*sev = last_batt_state == 2 ? MAV_SEVERITY_ERROR : MAV_SEVERITY_WARNING;
 		return 1;
 	}
 	return 0;
