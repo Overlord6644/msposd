@@ -2861,6 +2861,10 @@ static int px_osd_need_clear(uint8_t *buf)
 	return 0;
 }
 
+/* osd/dp_text.c, included after osd/mav_osd.c */
+static void dp_text_scan(void);
+static void dp_text_fill(PxTelemetry *t);
+
 static void px_osd_fill(PxTelemetry *t)
 {
 	memset(t, 0, sizeof(*t));
@@ -2939,7 +2943,8 @@ static void px_osd_fill(PxTelemetry *t)
 	if (strlen(air_unit_info_msg) > 1)
 		snprintf(t->msg, sizeof(t->msg), "%s", air_unit_info_msg);
 	t->fc_msg_sev = -1;
-	if (last_fc_msg[0] && get_time_ms() - last_fc_msg_ms < FC_MSG_HOLD_MS) {
+	dp_text_fill(t);   /* Betaflight's own words, when it sends DisplayPort */
+	if (!t->fc_msg[0] && last_fc_msg[0] && get_time_ms() - last_fc_msg_ms < FC_MSG_HOLD_MS) {
 		snprintf(t->fc_msg, sizeof(t->fc_msg), "%s", last_fc_msg);
 		t->fc_msg_sev = last_fc_msg_sev;
 	}
@@ -3420,6 +3425,13 @@ static void clear_screen() {
 	
 	if (cntr++ < 0)
 		return;
+	/* Pixel OSD: DisplayPort only feeds the text reader (osd/dp_text.c);
+	 * the canvas is the pixel layer's, and wiping it here would break its
+	 * redraw-only-what-changed cache. */
+	if (px_osd_active() && !DrawOSD) {
+		memset(character_map, 0, sizeof(character_map));
+		return;
+	}
 	// ClearScreen();
 	// BetaFlight needs this. INAV can be configured to skip it
 	if (!DrawOSD || font_pages == 1 || font_pages > 2 ||
@@ -3455,9 +3467,12 @@ static void draw_complete() {
 	stat_MSP_draw_complete_count++;
 	draws++;
 	memcpy(character_map_complete, character_map, sizeof(character_map));
-	draw_screenBMP();
+	if (px_osd_active() && !DrawOSD)
+		dp_text_scan();   /* the pixel OSD draws on its own clock */
+	else
+		draw_screenBMP();
 
-	if (draws < 2 && bitmapFnt.pData == NULL) {
+	if (draws < 2 && bitmapFnt.pData == NULL && !px_osd_active()) {
 		char msg[200];
 		sprintf(msg, "&F38 &L43 Identifying Flight Controller...", font_load_name);
 		SetOSDMsg(msg);

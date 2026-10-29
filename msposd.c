@@ -717,6 +717,7 @@ unsigned int mavbuff_offset = 0;
 unsigned int mavpckts_count = 0;
 
 #include "osd/mav_osd.c"
+#include "osd/dp_text.c"
 
 static void process_mavlink(uint8_t *buffer, int count, void *arg) {
 
