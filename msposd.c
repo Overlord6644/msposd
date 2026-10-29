@@ -1161,9 +1161,20 @@ static void send_variant_request2(int serial_fd) {
 
 	// Sending several request right one after another does not work well on INAV
 	// ...
-	if (VariantCounter==2) { // poll every one second,
-		// poll for FC_STATUS
-		construct_msp_command(buffer, MSP_CMD_STATUS, NULL, 0, MSP_OUTBOUND);
+	/* FC status: Betaflight's STATUS_EX also carries the arming-disable mask
+	 * the pixel OSD spells out, and twice a second so a reason clearing or
+	 * a mode switch shows promptly. Others keep the plain STATUS. */
+	int btfl = strncmp(current_fc_identifier, "BTFL", 4) == 0;
+	if (VariantCounter == 2 || (btfl && px_osd_active() && VariantCounter == 12)) {
+		construct_msp_command(buffer, btfl ? MSP_CMD_STATUS_EX : MSP_CMD_STATUS,
+			NULL, 0, MSP_OUTBOUND);
+		res = write(serial_fd, buffer, cmdlen);
+	}
+	/* Which flag bit is which mode depends on the FC's mode setup: ask until
+	 * known, then every 10 s in case it changed. */
+	if (btfl && px_osd_active() && VariantCounter == 8 &&
+		(bf_box_count < 0 || (get_current_time_ms() / 1000) % 10 == 0)) {
+		construct_msp_command(buffer, MSP_BOXIDS, NULL, 0, MSP_OUTBOUND);
 		res = write(serial_fd, buffer, cmdlen);
 	}
 

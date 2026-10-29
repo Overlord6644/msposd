@@ -180,6 +180,28 @@ static int32_t last_lon_e7 = 0;
 static uint32_t last_fm_flags = 0;
 static int last_fm_seen = 0;
 
+/* Betaflight, read as data rather than off its OSD (osd/dp_text.c turns
+ * these into words). MSP_STATUS's flag bits follow the boxes the CONFIG
+ * has active, not a fixed order: MSP_BOXIDS gives each bit's permanent id
+ * (1 ANGLE, 27 FAILSAFE, 35 CRASH FLIP, 46 GPS RESCUE...). -1 = not known
+ * yet. MSP_STATUS_EX adds the flags past 32 and the arming-disable mask;
+ * MSP_BATTERY_STATE Betaflight's battery verdict (1 LOW BATTERY, 2 LAND NOW,
+ * 0xFF = not seen). */
+static uint8_t bf_box_ids[128];
+static int bf_box_count = -1;
+static uint8_t bf_box_bits[16];
+static uint32_t bf_arm_flags = 0;
+static int bf_status_ex_seen = 0;
+static uint8_t last_batt_state = 0xFF;
+
+static int bf_box_on(uint8_t permanent_id)
+{
+	for (int i = 0; i < bf_box_count && i < 128; i++)
+		if (bf_box_ids[i] == permanent_id)
+			return (bf_box_bits[i / 8] >> (i % 8)) & 1;
+	return 0;
+}
+
 /* ArduPilot only ever sets the ARM bit in MSP_STATUS, so its mode has to come
  * from elsewhere: it puts the mode's short name ("FBWA", "RTL ", "QHOV") at the
  * start of the MSP_NAME craft-name field, which is what DJI goggles display.
@@ -880,9 +902,27 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	//}
 
 	switch (msp_message->cmd) {
+	case MSP_CMD_STATUS_EX:
 	case MSP_CMD_STATUS: {
 		if (msp_message->size < 7)
 			break;
+		if (msp_message->size >= 10) {
+			memset(bf_box_bits, 0, sizeof(bf_box_bits));
+			memcpy(bf_box_bits, &msp_message->payload[6], 4);
+		}
+		/* STATUS_EX: ... [15] count of flag bytes past 32, the bytes, then
+		 * the arming-disable flag count and its u32 mask */
+		if (msp_message->cmd == MSP_CMD_STATUS_EX && msp_message->size >= 16) {
+			unsigned n = msp_message->payload[15] & 0x0F;
+			if (n > sizeof(bf_box_bits) - 4)
+				n = sizeof(bf_box_bits) - 4;
+			if (msp_message->size >= 16 + n)
+				memcpy(bf_box_bits + 4, &msp_message->payload[16], n);
+			if (msp_message->size >= 21 + n) {
+				bf_arm_flags = *(uint32_t *)&msp_message->payload[17 + n];
+				bf_status_ex_seen = 1;
+			}
+		}
 		// we need the armed state
 #if defined(_x86) || defined(__ROCKCHIP__)
 		bool was_armed = armed;
@@ -1033,6 +1073,15 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 			last_vbat_cv = *(uint16_t *)&msp_message->payload[9];
 		else /* older API: fall back to the 0.1V byte */
 			last_vbat_cv = (uint16_t)(msp_message->payload[3] * 10);
+		if (msp_message->size >= 9)
+			last_batt_state = msp_message->payload[8];
+		break;
+	}
+
+	case MSP_BOXIDS: {
+		int n = msp_message->size < sizeof(bf_box_ids) ? msp_message->size : sizeof(bf_box_ids);
+		memcpy(bf_box_ids, msp_message->payload, n);
+		bf_box_count = n;
 		break;
 	}
 

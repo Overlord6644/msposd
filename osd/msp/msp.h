@@ -17,6 +17,7 @@
 #define MSP_ANALOG               110    //out message         vbat, powermeter, rssi, amperage
 
 #define MSP_CMD_ANALOG 110
+#define MSP_BOXIDS 119 // out message: permanent box id of each MSP_STATUS flag bit
 #define MSP_CMD_RC_TUNING 111
 #define MSP_CMD_PID 112
 #define MSP_CMD_BATTERY_STATE 130
