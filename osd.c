@@ -188,7 +188,7 @@ static int last_fm_seen = 0;
 static char last_ap_mode[5] = "";
 
 /* MAVLink (-M) values with no MSP counterpart; see osd/mav_osd.c. */
-static char last_mav_mode[8] = "";
+static char last_mav_mode[16] = "";
 static int last_throttle_pct = 0;
 static int last_batt_pct_fc = -1; /* the FC's own estimate, -1 = unknown */
 
@@ -197,7 +197,7 @@ static int last_batt_pct_fc = -1; /* the FC's own estimate, -1 = unknown */
  * craft-name text, which carries none and is shown as INFO. Held for as long
  * as ArduPilot's own OSD shows a message by default (OSD_MSG_TIME, 10 s). */
 #define FC_MSG_HOLD_MS 10000
-static char last_fc_msg[64] = "";
+static char last_fc_msg[128] = "";
 static int last_fc_msg_sev = -1;
 static uint64_t last_fc_msg_ms = 0;
 

@@ -77,15 +77,87 @@ static const char *mav_copter_mode(uint32_t m)
 	return m < sizeof(names) / sizeof(names[0]) ? names[m] : NULL;
 }
 
-/* Betaflight 2026.6+ custom_mode (bfMavMode_e) -> Betaflight's own OSD
- * names for those modes. */
+/* Betaflight 2026.6+ custom_mode (bfMavMode_e) -> what the pilot calls it.
+ * RTL is GPS Rescue (or a rescue flight plan). */
 static const char *mav_btfl_mode(uint32_t m)
 {
 	static const char *const names[] = {
-		"ACRO", "STAB", "HOR", "ALTH", "POSH", "AUTO", "RESC", "!FS!",
+		"ACRO", "ANGLE", "HORIZON", "ALT HOLD", "POS HOLD", "AUTOPILOT",
+		"GPS RESCUE", "FAILSAFE",
 	};
 	return m < sizeof(names) / sizeof(names[0]) ? names[m] : NULL;
 }
+
+/* Which numbering a MAV_AUTOPILOT_GENERIC heartbeat uses, when no
+ * AUTOPILOT_VERSION answer settled it: the STABILIZE flag tells them apart.
+ * Legacy Betaflight sets it with custom_mode 0 (STABILIZE) and not with 1
+ * (ACRO); 2026.6 sets it for every mode but 0 (ACRO). */
+static int mav_btfl_numbering(const mavlink_heartbeat_t *hb)
+{
+	if (mav_btfl_calver >= 0)
+		return mav_btfl_calver;
+	int stab = (hb->base_mode & MAV_MODE_FLAG_STABILIZE_ENABLED) != 0;
+	return hb->custom_mode >= 2 || stab == (hb->custom_mode != 0);
+}
+
+/* Betaflight STATUSTEXT "Arming disabled: RXLOSS THROTTLE ..." (2026.6+):
+ * its flag names (fc/runtime_config.c) -> words a pilot reads at a glance. */
+static const struct { const char *flag, *text; } mav_arm_reasons[] = {
+	{"NOGYRO", "NO GYRO"},             {"FAILSAFE", "FAILSAFE"},
+	{"RXLOSS", "RX LOSS"},             {"NOT_DISARMED", "DISARM FIRST"},
+	{"BOXFAILSAFE", "FAILSAFE SWITCH"}, {"RUNAWAY", "RUNAWAY TAKEOFF"},
+	{"CRASH", "CRASH DETECTED"},       {"THROTTLE", "THROTTLE UP"},
+	{"ANGLE", "NOT LEVEL"},            {"BOOTGRACE", "BOOTING"},
+	{"NOPREARM", "PREARM OFF"},        {"LOAD", "CPU LOAD"},
+	{"CALIB", "CALIBRATING"},          {"CLI", "CLI OPEN"},
+	{"CMS", "OSD MENU OPEN"},          {"MSP", "CONFIGURATOR"},
+	{"PARALYZE", "PARALYZED"},         {"GPS", "NO GPS FIX"},
+	{"RESCUE_SW", "RESCUE SWITCH ON"}, {"DSHOT_TELEM", "NO DSHOT TELEMETRY"},
+	{"REBOOT_REQD", "REBOOT NEEDED"},  {"NO_ACC_CAL", "ACC NOT CALIBRATED"},
+	{"MOTOR_PROTO", "MOTOR PROTOCOL"}, {"FLIP_SWITCH", "CRASH FLIP SWITCH"},
+	{"ALT_HOLD_SW", "ALT HOLD SWITCH ON"}, {"POS_HOLD_SW", "POS HOLD SWITCH ON"},
+	{"AUTOPILOT_SW", "AUTOPILOT SWITCH ON"}, {"ARM_SWITCH", "ARM SWITCH ON"},
+};
+
+#define MAV_ARM_PREFIX "CAN'T ARM: "
+
+/* Rewrite an "Arming disabled:" text in place; 0 when it is not one. */
+static int mav_arm_text(const char *in, char *out, size_t n)
+{
+	static const char head[] = "Arming disabled:";
+	if (strncmp(in, head, sizeof(head) - 1) != 0)
+		return 0;
+	snprintf(out, n, "%s", MAV_ARM_PREFIX);
+	const char *p = in + sizeof(head) - 1;
+	int first = 1;
+	while (*p) {
+		while (*p == ' ')
+			p++;
+		const char *e = p;
+		while (*e && *e != ' ')
+			e++;
+		if (e == p)
+			break;
+		char tok[24];
+		size_t len = (size_t)(e - p) < sizeof(tok) - 1 ? (size_t)(e - p) : sizeof(tok) - 1;
+		memcpy(tok, p, len);
+		tok[len] = '\0';
+		const char *word = tok;   /* unknown flags stay in Betaflight's words */
+		for (size_t i = 0; i < sizeof(mav_arm_reasons) / sizeof(mav_arm_reasons[0]); i++)
+			if (!strcmp(tok, mav_arm_reasons[i].flag))
+				word = mav_arm_reasons[i].text;
+		size_t used = strlen(out);
+		snprintf(out + used, n - used, "%s%s", first ? "" : " - ", word);
+		first = 0;
+		p = e;
+	}
+	return 1;
+}
+
+/* Crash flip (turtle) is not in Betaflight's MAVLink at all. But arming is
+ * refused past small_angle unless crash flip is on, so a quad that arms
+ * upside down or on its side is in crash flip - until it disarms. */
+static int mav_crash_flip = 0;
 
 static int mav_is_plane(uint8_t type)
 {
@@ -115,7 +187,18 @@ static void mav_osd_heartbeat(const mavlink_message_t *msg)
 	mav_fc_compid = msg->compid;
 	mav_fc_type = hb.type;
 	mav_fc_autopilot = hb.autopilot;
+	bool was_armed = armed;
 	armed = (hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
+	if (armed && !was_armed) {
+		/* last_roll/pitch are decidegrees; 60 degrees is well past any
+		 * small_angle a quad can arm at level */
+		mav_crash_flip = abs(last_roll) > 600 || abs(last_pitch) > 600;
+		/* armed: whatever stopped it before is gone */
+		if (!strncmp(last_fc_msg, MAV_ARM_PREFIX, sizeof(MAV_ARM_PREFIX) - 1))
+			last_fc_msg[0] = '\0';
+	}
+	if (!armed)
+		mav_crash_flip = 0;
 
 	const char *name = NULL;
 	if (hb.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA) {
@@ -126,11 +209,16 @@ static void mav_osd_heartbeat(const mavlink_message_t *msg)
 		/* Until the version answer, the legacy numbering: right for an
 		 * old Betaflight or INAV, and a new Betaflight answers within a
 		 * tick of its first heartbeat. */
-		if (mav_btfl_calver == 1)
+		if (mav_btfl_numbering(&hb))
 			name = mav_btfl_mode(hb.custom_mode);
 		else
 			name = mav_is_plane(hb.type) ? mav_plane_mode(hb.custom_mode)
 						     : mav_copter_mode(hb.custom_mode);
+		/* Betaflight of any version: armed and CRITICAL is its failsafe */
+		if (armed && hb.system_status == MAV_STATE_CRITICAL)
+			name = "FAILSAFE";
+		else if (mav_crash_flip)
+			name = "CRASH FLIP";
 	}
 	if (name)
 		snprintf(last_mav_mode, sizeof(last_mav_mode), "%s", name);
@@ -288,7 +376,15 @@ static void mav_osd_handle(const mavlink_message_t *msg)
 		char text[sizeof(st.text) + 1];
 		memcpy(text, st.text, sizeof(st.text));
 		text[sizeof(st.text)] = '\0';
-		set_fc_msg(text, st.severity);
+		/* Betaflight sends the arming text on every change, and nothing
+		 * once the last reason clears; held as an FC message, it shows for
+		 * a while after each change and goes on arming. As a warning, so
+		 * the widget's colour says it is one. */
+		char arm[sizeof(last_fc_msg)];
+		if (mav_arm_text(text, arm, sizeof(arm)))
+			set_fc_msg(arm, MAV_SEVERITY_WARNING);
+		else
+			set_fc_msg(text, st.severity);
 		break;
 	}
 	}
