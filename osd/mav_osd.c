@@ -460,9 +460,11 @@ static void mav_osd_dump(void)
 	px_osd_fill(&t);
 	printf("[telem] mode=%s armed=%d roll=%.1f pitch=%.1f hdg=%.0f alt=%.0f "
 	       "spd=%.1fkph vs=%.1f thr=%d volt=%.2f curr=%.2f mah=%d bat=%d%% "
-	       "sats=%d home=%.0fm@%.0f rssi=%d fc_msg[%d]=\"%s\"\n",
+	       "sats=%d home=%.0fm@%.0f rssi=%d fc_msg[%d]=\"%s\" "
+	       "bf: boxes=%d arm_flags=0x%08x batt_state=%d\n",
 	       t.mode, t.armed, t.roll_deg, t.pitch_deg, t.yaw_deg, t.alt_m,
 	       t.spd_kph, t.vspd_ms, t.throttle_pct, t.volt_v, t.curr_a, t.mah_used,
 	       t.batt_pct, t.sats, t.home_dist_m, t.home_bearing_deg, t.rssi_pct,
-	       t.fc_msg_sev, t.fc_msg);
+	       t.fc_msg_sev, t.fc_msg, bf_box_count, (unsigned)bf_arm_flags,
+	       last_batt_state);
 }

@@ -2918,6 +2918,7 @@ static int px_osd_need_clear(uint8_t *buf)
 /* osd/dp_text.c, included after osd/mav_osd.c */
 static void dp_text_scan(void);
 static void dp_text_fill(PxTelemetry *t);
+static void mav_osd_dump(void);  /* osd/mav_osd.c: MSPOSD_TELEM_DUMP=1 */
 
 static void px_osd_fill(PxTelemetry *t)
 {
@@ -3043,6 +3044,7 @@ static void px_osd_fill(PxTelemetry *t)
 
 static void px_osd_draw(const PxDirty *det_now)
 {
+	mav_osd_dump();   /* MSP or MAVLink alike; once a second, when asked */
 	if (!g_px_layout_loaded || bmpBuff.pData == NULL)
 		return;
 	if (PIXEL_FORMAT_DEFAULT != PIXEL_FORMAT_I4)
