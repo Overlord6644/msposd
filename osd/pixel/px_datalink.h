@@ -37,6 +37,9 @@ typedef struct {
 	int   bandwidth_mhz; /* Ch:165-20mhz    channel width           */
 	int   pubq;          /* q:1745          driver queue metric     */
 	int   heat;          /* REDUCING_HEAT: thermal step-down active */
+	int   wfb;           /* "WFB" on the status line: the dual
+	                      * firmware's wfb-ng mode (linkmode watch
+	                      * writes it); aalink's line = APFPV       */
 	int   have;          /* 1 once anything has been parsed         */
 } PxDatalink;
 

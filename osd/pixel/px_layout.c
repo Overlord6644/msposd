@@ -95,6 +95,10 @@ const char *px_telemetry_text(const PxTelemetry *t, const char *source)
 		return t->fc_msg;
 	if (strcmp(source, "armed") == 0)
 		return t->armed ? "ARMED" : "DISARMED";
+	/* which link the video rides: the dual firmware's WFB status line says
+	 * so, aalink's APFPV one does not; empty until a line was read */
+	if (strcmp(source, "dl_link") == 0)
+		return !t->dl.have ? "" : t->dl.wfb ? "WFB" : "APFPV";
 	/* Static buffers, one per source: the draw pass and the cache signature
 	 * both call this within a frame, and different sources must not share. */
 	if (strcmp(source, "home_auto") == 0) {

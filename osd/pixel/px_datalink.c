@@ -63,8 +63,10 @@ void px_datalink_parse(PxDatalink *dl, const char *line)
 	/* aalink puts REDUCING_HEAT where the bitrate goes while it steps the
 	 * frame rate down for heat. Decided on its status line only (the one
 	 * with MCS:), so a line from another source does not clear it. */
-	if (strstr(line, "MCS:"))
+	if (strstr(line, "MCS:")) {
 		dl->heat = strstr(line, "REDUCING_HEAT") != NULL;
+		dl->wfb = strstr(line, "WFB") != NULL;
+	}
 
 	v = number_before(line, "kbps", &ok);
 	if (ok) { dl->bitrate_kbps = (int)v; dl->have = 1; }
