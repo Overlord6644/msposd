@@ -1693,6 +1693,14 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	/* -r >1000's simple UART reading only feeds the MSP parser, and it turns
+	 * the evented reader off: with -M nothing would read the FC at all. A
+	 * MAVLink FC pushes its stream, so read it as it comes. */
+	if (!ParseMSP && enable_simple_uart) {
+		enable_simple_uart = false;
+		printf("Mavlink mode: simple UART reading off\n");
+	}
+
 	strcpy(_port_name, port_name);
 	if (pixel_layout_path) {
 		/* The pixel OSD owns the canvas. -z flips DrawOSD on as a side effect
