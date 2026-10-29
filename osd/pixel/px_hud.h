@@ -18,10 +18,12 @@
 
 /* Heading ribbon: ticks every `step` degrees across `w` pixels spanning `span`
  * degrees, cardinal letters where they fall, and a fixed pointer at the centre.
- * Centred on (cx, y). */
+ * Centred on (cx, y). `home_deg`, the bearing of home from north, puts a house
+ * on the ribbon where home lies - at the edge to turn toward when it is off
+ * the ribbon; NAN draws none. */
 void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 	float span_deg, float step_deg, int text_size, uint8_t color,
-	uint8_t accent, uint8_t edge);
+	uint8_t accent, uint8_t edge, float home_deg);
 
 /* Vertical tape: a moving window of `span` units over `h` pixels, ticks every
  * `step`, labels every other tick, and the current value in a box that points

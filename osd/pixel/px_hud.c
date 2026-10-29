@@ -1,5 +1,6 @@
 /* px_hud.c - see px_hud.h. */
 #include "px_hud.h"
+#include "px_icon.h"
 #include "px_text.h"
 
 #include <math.h>
@@ -42,7 +43,7 @@ static void edge_line(const PxCanvas *c, int x0, int y0, int x1, int y1,
 
 void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 	float span_deg, float step_deg, int text_size, uint8_t color,
-	uint8_t accent, uint8_t edge)
+	uint8_t accent, uint8_t edge, float home_deg)
 {
 	if (w <= 0 || span_deg <= 0.0f || step_deg <= 0.0f)
 		return;
@@ -83,6 +84,22 @@ void px_hud_compass(const PxCanvas *c, int cx, int y, int w, float heading_deg,
 			label(&rib, x, tick_top + tick_major + text_size + 2,
 				n[deg / 45], text_size, deg == 0 ? accent : color, edge);
 		}
+	}
+
+	/* Home on the ribbon, just above the ticks: where it sits is the turn
+	 * to fly home (under the pointer = heading home). Off the ribbon it
+	 * waits at the edge of the side home lies on, so the turn is still
+	 * read at a glance. */
+	if (!isnan(home_deg)) {
+		float d = fmodf(home_deg - heading_deg + 540.0f, 360.0f) - 180.0f;
+		int ih = text_size * 3 / 4 > 10 ? text_size * 3 / 4 : 10;
+		int iw = px_icon_width(ih, PX_ICON_HOME);
+		int hx = cx + (int)lrintf(d * px_per_deg);
+		if (hx < cx - half + iw / 2)
+			hx = cx - half + iw / 2;
+		if (hx > cx + half - iw / 2)
+			hx = cx + half - iw / 2;
+		px_icon(c, hx - iw / 2, tick_top - ih - 2, ih, PX_ICON_HOME, accent, edge);
 	}
 
 	/* Fixed pointer above the ribbon, aiming down at it. */

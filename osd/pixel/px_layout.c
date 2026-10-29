@@ -103,7 +103,11 @@ const char *px_telemetry_text(const PxTelemetry *t, const char *source)
 	 * both call this within a frame, and different sources must not share. */
 	if (strcmp(source, "home_auto") == 0) {
 		static char buf[16];
-		fmt_auto_dist(buf, sizeof(buf), t->home_dist_m);
+		/* no home yet: say so, rather than a home 0 m away */
+		if (!t->home_valid)
+			snprintf(buf, sizeof(buf), "--");
+		else
+			fmt_auto_dist(buf, sizeof(buf), t->home_dist_m);
 		return buf;
 	}
 	if (strcmp(source, "trip_auto") == 0) {
@@ -616,6 +620,13 @@ static void arrow_pts(const PxWidget *w, const PxTelemetry *t, int *p)
 #undef ROT_Y
 }
 
+/* Home's bearing for the compass ribbon, NAN for none: no home yet, or over
+ * it (within 3 m the bearing is GPS noise, as for the arrow). */
+static float compass_home(const PxTelemetry *t)
+{
+	return t->home_valid && t->home_dist_m >= 3.0f ? t->home_abs_deg : NAN;
+}
+
 static void draw_compass(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
 {
@@ -625,7 +636,8 @@ static void draw_compass(const PxWidget *w, const PxCanvas *c,
 	px_hud_compass(c, w->x, w->y, w->w > 0 ? w->w : 520, v,
 		w->span > 0.0f ? w->span : 90.0f,
 		w->step > 0.0f ? w->step : 15.0f,
-		w->size > 0 ? w->size : 22, w->color, w->accent, w->edge);
+		w->size > 0 ? w->size : 22, w->color, w->accent, w->edge,
+		compass_home(t));
 }
 
 static void draw_tape(const PxWidget *w, const PxCanvas *c,
@@ -649,9 +661,33 @@ static void draw_ladder(const PxWidget *w, const PxCanvas *c,
 		w->size > 0 ? w->size : 20, w->color, w->accent, w->edge);
 }
 
+/* What an arrow fed by home shows: 0 nothing (the FC has no home yet - an
+ * arrow pointing ahead would be a lie), 1 the "over home" ring (within
+ * 3 m the bearing is GPS noise and the arrow would spin), 2 the arrow.
+ * Arrows on any other source always draw. Shared by draw and signature. */
+static int arrow_state(const PxWidget *w, const PxTelemetry *t)
+{
+	if (*w->source && strncmp(w->source, "home", 4) != 0)
+		return 2;
+	if (!t->home_valid)
+		return 0;
+	return t->home_dist_m < 3.0f ? 1 : 2;
+}
+
 static void draw_arrow(const PxWidget *w, const PxCanvas *c,
 	const PxTelemetry *t)
 {
+	int st = arrow_state(w, t);
+	if (st == 0)
+		return;
+	if (st == 1) {
+		int r = (w->size > 0 ? w->size : 40) / 2;
+		if (w->edge != PX_TRANSPARENT)
+			px_circle(c, w->x, w->y, r + 1, w->edge);
+		px_circle(c, w->x, w->y, r, w->color);
+		px_disc(c, w->x, w->y, 2, w->color);
+		return;
+	}
 	/* Shaft-and-head arrow, rotated continuously: a glyph OSD would
 	 * quantise this to a handful of fixed arrow sprites. */
 	int p[8];
@@ -998,7 +1034,9 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 	}
 	case PX_W_ARROW: {
 		int p[8];
+		int st = arrow_state(w, t);
 		arrow_pts(w, t, p);
+		h = fnv1a(h, &st, sizeof(st));
 		return fnv1a(h, p, sizeof(p));
 	}
 	case PX_W_COMPASS: {
@@ -1006,7 +1044,12 @@ static uint32_t widget_sig(const PxWidget *w, const PxTelemetry *t)
 		if (*w->source)
 			px_telemetry_value(t, w->source, &v);
 		float span = w->span > 0.0f ? w->span : 90.0f;
-		int q = (int)lrintf(v * ((float)(w->w > 0 ? w->w : 520) / span));
+		float ppd = (float)(w->w > 0 ? w->w : 520) / span;
+		int q = (int)lrintf(v * ppd);
+		/* the home marker rides the ribbon on its own bearing */
+		float hd = compass_home(t);
+		int hq = isnan(hd) ? -1 : (int)lrintf(hd * ppd);
+		h = fnv1a(h, &hq, sizeof(hq));
 		return fnv1a(h, &q, sizeof(q)); /* pixels of ribbon travel */
 	}
 	case PX_W_TAPE: {

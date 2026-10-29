@@ -2966,7 +2966,19 @@ static void px_osd_fill(PxTelemetry *t)
 	}
 	t->rpm_avg = (float)last_rpm_avg;
 	t->home_dist_m = (float)last_distanceToHome;
-	t->home_bearing_deg = (float)last_directionToHome;
+	/* MSP_COMP_GPS (Betaflight, INAV) and the MAVLink path (mav_osd.c) both
+	 * give the ABSOLUTE bearing to home, from north. The arrow needs it
+	 * from the nose - Betaflight's own OSD draws direction minus yaw - or it
+	 * is only right flying north. Both are 0 while the FC has no home. */
+	t->home_valid = last_distanceToHome > 0 || last_directionToHome != 0;
+	{
+		float abs_deg = fmodf((float)last_directionToHome, 360.0f);
+		if (abs_deg < 0.0f)
+			abs_deg += 360.0f;
+		float rel = fmodf(abs_deg - t->yaw_deg + 540.0f, 360.0f) - 180.0f;
+		t->home_abs_deg = abs_deg;
+		t->home_bearing_deg = rel;
+	}
 	t->rssi_pct = last_rssi_pct < 0 ? 0 : last_rssi_pct;
 	t->lq_pct = 0;
 	t->armed = armed ? 1 : 0;
