@@ -2527,6 +2527,15 @@ static char font[256];
 		// rendering text on goke  makes the program crash?! Need to fix.
 		//  so we simply send it to the ground
 
+		/* Not with the pixel OSD: its datalink widgets already draw this line
+		 * into the video, and the ground msposd (the goggles' map) drew it a
+		 * second time on top, in its own font. Kept for the subtitles. */
+		if (px_osd_active() && !DrawOSD) {
+			out[MAX_STATUS_MSG_LEN-1] = 0;
+			snprintf(ready_osdmsg, sizeof ready_osdmsg, "%s", out);
+			return false;
+		}
+
 		if (!DrawOSD && out_sock > 0) { // send the line to the ground
 			static uint8_t msg_buffer[MAX_STATUS_MSG_LEN + 6];
 			static uint8_t payload_buffer[MAX_STATUS_MSG_LEN];
