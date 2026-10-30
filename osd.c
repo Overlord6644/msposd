@@ -159,7 +159,12 @@ static int16_t last_directionToHome = 0;
 static int16_t last_distanceToHome = 0;
 
 static int16_t last_groundCourse = 0;
+/* Altitude on the OSD, metres: height above the arming point - Betaflight's
+ * baro+GPS blend (MSP_ALTITUDE), ArduPilot's EKF3 relative_alt. The GPS's
+ * own altitude above sea level is kept apart for what needs it (terrain
+ * clearance, POIs on the ground station). */
 static int16_t last_altitude = 0;
+static int16_t last_gps_alt_msl = 0;
 static int16_t last_speed = 0;
 static int16_t last_vario = 0; //cm/s
 #if defined(_x86) || defined(__ROCKCHIP__)
@@ -1057,19 +1062,27 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 		last_lon = *(int32_t *)&msp_message->payload[6];  // deg * 1e7
 #endif
 		last_groundCourse = *(int16_t *)&msp_message->payload[14] / 10; // protocol sends tenths of degrees
-		last_altitude = *(int16_t *)&msp_message->payload[10];
+		last_gps_alt_msl = *(int16_t *)&msp_message->payload[10];
 		last_speed = *(int16_t *)&msp_message->payload[12];
 #if defined(_x86) || defined(__ROCKCHIP__)
 		if (DrawOSD && AGL_enabled)
 			terrain_agl_update_gps(last_lat / 10000000.0, last_lon / 10000000.0,
-				(double)last_altitude, current_gps_valid(), get_time_ms());
+				(double)last_gps_alt_msl, current_gps_valid(), get_time_ms());
 		capture_home_if_pending();
 		provisional_home();
 #endif
 		//last_groundCourse = last_heading + stat_msp_ttl%90 -45; //Simulate offset 
 		break;
 	}
+	/* MSP_ALTITUDE: estimated altitude int32 cm above the arming point (the
+	 * FC's baro+GPS blend), then vario int16 cm/s from the same estimate -
+	 * Betaflight and INAV alike. Altitude and vario now come from one
+	 * source; the altitude used to be MSP_RAW_GPS's, above sea level. */
 	case MSP_ALTITUDE: {
+		if (msp_message->size < 6)
+			break;
+		int32_t cm = *(int32_t *)&msp_message->payload[0];
+		last_altitude = (int16_t)(cm / 100);
 		last_vario = *(int16_t *)&msp_message->payload[4];
 		break;
 	}
@@ -2024,7 +2037,7 @@ static void draw_Ladder() {
 	} // draw ladder
 
 #if defined(_x86) || defined(__ROCKCHIP__)
-	DrawPOIs(last_lat, last_lon, last_altitude, last_heading,
+	DrawPOIs(last_lat, last_lon, last_gps_alt_msl, last_heading,
 	         pitch_degree, pos_y, f, vFOV_deg);
 #endif
 
