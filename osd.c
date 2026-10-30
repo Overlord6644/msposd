@@ -1113,21 +1113,36 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	}
 
 
-	/* MSP_MOTOR_TELEMETRY: count u8, then per motor rpm u32, invalid% u16,
-	 * temperature u8, voltage u16, current u16, consumption u16 (13 bytes).
-	 * Only the rpm average is kept - the OSD shows one figure, not four.
-	 * All zeros without bidirectional DShot, which is the honest answer. */
-	/* MSP_RAW_IMU: acc x, y, z (int16), then gyro and mag. Betaflight and
-	 * INAV both scale the accelerometer to 512 per g; z is up at rest. */
+	/* MSP_RAW_IMU: acc x, y, z (int16), then gyro and mag; z is up at rest.
+	 * The scale is NOT fixed: older Betaflight and INAV send 512 per g,
+	 * Betaflight 2026.6 sends the sensor's own 2048 (a quad at rest read
+	 * 4.0G). So it is measured: on the ground, disarmed, the vector's length
+	 * is 1 g. Smoothed, then snapped to the nearest power of two - every
+	 * FC scale is one, and the snap keeps a nudge on the bench from bending
+	 * it. Until a disarmed reading, the first sample's length. */
 	case MSP_RAW_IMU: {
+		static float lsb_f, lsb;
 		if (msp_message->size >= 6) {
+			int16_t x = *(int16_t *)&msp_message->payload[0];
+			int16_t y = *(int16_t *)&msp_message->payload[2];
 			int16_t z = *(int16_t *)&msp_message->payload[4];
-			last_g = (float)z / 512.0f;
-			last_g_valid = 1;
+			float mag = sqrtf((float)x * x + (float)y * y + (float)z * z);
+			if (mag > 50.0f && (!armed || lsb_f == 0.0f)) {
+				lsb_f = lsb_f == 0.0f ? mag : lsb_f + (mag - lsb_f) * 0.1f;
+				lsb = exp2f(roundf(log2f(lsb_f)));
+			}
+			if (lsb > 0.0f) {
+				last_g = (float)z / lsb;
+				last_g_valid = 1;
+			}
 		}
 		break;
 	}
 
+	/* MSP_MOTOR_TELEMETRY: count u8, then per motor rpm u32, invalid% u16,
+	 * temperature u8, voltage u16, current u16, consumption u16 (13 bytes).
+	 * Only the rpm average is kept - the OSD shows one figure, not four.
+	 * All zeros without bidirectional DShot, which is the honest answer. */
 	case MSP_MOTOR_TELEMETRY: {
 		int n = msp_message->payload[0];
 		if (n > 8)
