@@ -38,6 +38,18 @@ typedef struct {
 	/* Average of the motors' eRPM/pole-pairs, from MSP_MOTOR_TELEMETRY.
 	 * Needs bidirectional DShot on the FC; stays 0 without it. */
 	float rpm_avg;
+	/* Vertical load factor in g (1.0 = level flight), smoothed; its largest
+	 * magnitude since arming; and OVER G (past MSPOSD_G_LIMIT, 4 g). */
+	int   g_valid;
+	float g_load;
+	float g_max;
+	int   g_over;
+	/* Airspeed, the FC's minimum flying speed (ArduPilot AIRSPEED_MIN), and
+	 * the stall warning: 0 none, 1 LOW SPEED, 2 STALL. */
+	int   aspd_valid;
+	float aspd_kph;
+	float aspd_min_kph;
+	int   stall_lvl;
 
 	/* Navigation */
 	int   sats;

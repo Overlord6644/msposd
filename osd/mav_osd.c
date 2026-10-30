@@ -28,6 +28,7 @@ static const struct {
 	{MAVLINK_MSG_ID_RC_CHANNELS, 500000},         /* RSSI (ArduPilot) */
 	{MAVLINK_MSG_ID_RC_CHANNELS_RAW, 500000},     /* RSSI + channels (Betaflight) */
 	{MAVLINK_MSG_ID_HOME_POSITION, 2000000},      /* home, for distance/bearing */
+	{MAVLINK_MSG_ID_RAW_IMU, 100000},             /* 10 Hz: the G meter */
 	{11030, 250000},  /* ESC_TELEMETRY_1_TO_4 (ArduPilot): motor RPM, see below */
 };
 
@@ -333,6 +334,39 @@ static void mav_osd_handle(const mavlink_message_t *msg)
 		last_speed = (int16_t)lrintf(v.groundspeed * 100.0f);
 		last_vario = (int16_t)lrintf(v.climb * 100.0f);
 		last_throttle_pct = v.throttle;
+		/* ArduPilot's airspeed: the sensor's, or its own estimate (ground
+		 * speed and wind) without one - either is what it flies by */
+		if (mav_fc_autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA)
+			last_airspeed_ms = v.airspeed;
+		break;
+	}
+
+	case MAVLINK_MSG_ID_RAW_IMU: {
+		/* ArduPilot fills RAW_IMU in mG (body frame, z down: level flight
+		 * reads -1000), so the load factor is -z */
+		mavlink_raw_imu_t r;
+		mavlink_msg_raw_imu_decode(msg, &r);
+		if (msg->sysid != mav_fc_sysid)
+			break;
+		last_g = -(float)r.zacc / 1000.0f;
+		last_g_valid = 1;
+		break;
+	}
+
+	case MAVLINK_MSG_ID_PARAM_VALUE: {
+		mavlink_param_value_t p;
+		char id[17];
+		mavlink_msg_param_value_decode(msg, &p);
+		memcpy(id, p.param_id, 16);
+		id[16] = '\0';
+		/* AIRSPEED_MIN since ArduPilot 4.5, ARSPD_FBW_MIN before */
+		if ((!strcmp(id, "AIRSPEED_MIN") || !strcmp(id, "ARSPD_FBW_MIN")) &&
+		    p.param_value > 1.0f) {
+			fc_aspd_min_ms = p.param_value;
+			if (verbose)
+				printf("[mav_osd] %s = %.1f m/s: stall warning armed\n",
+				       id, (double)p.param_value);
+		}
 		break;
 	}
 
@@ -473,6 +507,21 @@ static void mav_osd_request_streams(int fd)
 		int len = mavlink_msg_to_send_buffer(buf, &m);
 		if (write(fd, buf, len) != len && verbose)
 			printf("[mav_osd] stream request write failed\n");
+	}
+
+	/* The stall warning's threshold, until ArduPilot has answered. Both
+	 * names: one of them is "not found" and simply gets no answer. */
+	if (mav_fc_autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA && fc_aspd_min_ms <= 0.0f) {
+		static const char *const names[] = {"AIRSPEED_MIN", "ARSPD_FBW_MIN"};
+		for (int i = 0; i < 2; i++) {
+			mavlink_message_t m;
+			uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+			mavlink_msg_param_request_read_pack_chan(MAV_OSD_SYSID, MAV_COMP_ID_OSD,
+				MAVLINK_COMM_2, &m, mav_fc_sysid, mav_fc_compid, names[i], -1);
+			int len = mavlink_msg_to_send_buffer(buf, &m);
+			if (write(fd, buf, len) != len && verbose)
+				printf("[mav_osd] param request write failed\n");
+		}
 	}
 
 	/* Which mode numbering a generic autopilot uses (see mav_btfl_calver).

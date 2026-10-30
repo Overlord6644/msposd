@@ -1239,6 +1239,11 @@ static void send_variant_request2(int serial_fd) {
 			construct_msp_command(buffer, MSP_MOTOR_TELEMETRY, NULL, 0, MSP_OUTBOUND);
 			res = write(serial_fd, buffer, cmdlen);
 		}
+		/* The G meter: four times a second, a 18-byte answer. */
+		if (px_osd_active() && (VariantCounter % 5) == 3) {
+			construct_msp_command(buffer, MSP_RAW_IMU, NULL, 0, MSP_OUTBOUND);
+			res = write(serial_fd, buffer, cmdlen);
+		}
 	}
 		
 	VariantCounter++;

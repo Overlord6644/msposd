@@ -56,6 +56,14 @@ int px_telemetry_value(const PxTelemetry *t, const char *source, float *out)
 		{"cell_volt",   t->cells > 0 ? t->volt_v / (float)t->cells : t->volt_v},
 		{"trip",        t->trip_m},
 		{"rpm",         t->rpm_avg},
+		{"g",           t->g_load},
+		{"g_max",       t->g_max},
+		/* numeric twins of the text sources below, for warn/crit colours */
+		{"g_auto",      fabsf(t->g_load)},
+		{"g_warn",      t->g_over ? 2.0f : 0.0f},
+		{"aspd",        t->aspd_kph},
+		{"aspd_min",    t->aspd_min_kph},
+		{"stall_warn",  (float)t->stall_lvl},
 	};
 	for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
 		if (strcmp(map[i].n, source) == 0) {
@@ -108,6 +116,34 @@ const char *px_telemetry_text(const PxTelemetry *t, const char *source)
 			snprintf(buf, sizeof(buf), "--");
 		else
 			fmt_auto_dist(buf, sizeof(buf), t->home_dist_m);
+		return buf;
+	}
+	/* The G meter, empty until the FC has sent an accelerometer reading */
+	if (strcmp(source, "g_auto") == 0) {
+		static char buf[16];
+		if (!t->g_valid)
+			buf[0] = '\0';
+		else
+			snprintf(buf, sizeof(buf), "%.1fG", t->g_load);
+		return buf;
+	}
+	if (strcmp(source, "g_warn") == 0) {
+		static char buf[24];
+		if (!t->g_over)
+			buf[0] = '\0';
+		else
+			snprintf(buf, sizeof(buf), "OVER G %.1f", fabsf(t->g_load));
+		return buf;
+	}
+	/* Empty unless warning: a widget with it shows nothing in normal flight */
+	if (strcmp(source, "stall_warn") == 0)
+		return t->stall_lvl == 2 ? "STALL" : t->stall_lvl == 1 ? "LOW SPEED" : "";
+	if (strcmp(source, "aspd_auto") == 0) {
+		static char buf[16];
+		if (!t->aspd_valid)
+			buf[0] = '\0';
+		else
+			snprintf(buf, sizeof(buf), "AS %.0f", t->aspd_kph);
 		return buf;
 	}
 	if (strcmp(source, "trip_auto") == 0) {

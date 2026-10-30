@@ -11,6 +11,7 @@
 #define MSP_CMD_RC 105
 #define MSP_RAW_GPS              106    //out message         fix, numsat, lat, lon, alt, speed, ground course
 #define MSP_COMP_GPS 107
+#define MSP_RAW_IMU 102 // out message: acc/gyro/mag raw (acc 512 = 1 g)
 #define MSP_ATTITUDE 108
 #define MSP_RC 105
 #define MSP_ALTITUDE             109    //out message         altitude, variometer

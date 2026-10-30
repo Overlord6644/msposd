@@ -300,6 +300,15 @@ static uint8_t  last_batt_cells = 0;
 static uint16_t last_batt_capacity = 0;
 static int      last_rssi_pct = -1;   /* -1 = never received */
 static uint32_t last_rpm_avg = 0;     /* MSP_MOTOR_TELEMETRY, needs bidir DShot */
+/* Load factor along the vertical body axis, in g (1.0 level flight, more in
+ * a pull-up): MSP_RAW_IMU on Betaflight/INAV, RAW_IMU on ArduPilot. */
+static float last_g = 0.0f;
+static int last_g_valid = 0;
+/* Airspeed, m/s, and the FC's minimum flying speed (ArduPilot AIRSPEED_MIN,
+ * read once from its parameters): the stall warning's two inputs. A FC
+ * without them (Betaflight) simply never warns. */
+static float last_airspeed_ms = -1.0f;
+static float fc_aspd_min_ms = 0.0f;
 
 static msp_state_t *msp_state;
 
@@ -1108,6 +1117,17 @@ static void rx_msp_callback(msp_msg_t *msp_message) {
 	 * temperature u8, voltage u16, current u16, consumption u16 (13 bytes).
 	 * Only the rpm average is kept - the OSD shows one figure, not four.
 	 * All zeros without bidirectional DShot, which is the honest answer. */
+	/* MSP_RAW_IMU: acc x, y, z (int16), then gyro and mag. Betaflight and
+	 * INAV both scale the accelerometer to 512 per g; z is up at rest. */
+	case MSP_RAW_IMU: {
+		if (msp_message->size >= 6) {
+			int16_t z = *(int16_t *)&msp_message->payload[4];
+			last_g = (float)z / 512.0f;
+			last_g_valid = 1;
+		}
+		break;
+	}
+
 	case MSP_MOTOR_TELEMETRY: {
 		int n = msp_message->payload[0];
 		if (n > 8)
@@ -2920,6 +2940,69 @@ static void dp_text_scan(void);
 static void dp_text_fill(PxTelemetry *t);
 static void mav_osd_dump(void);  /* osd/mav_osd.c: MSPOSD_TELEM_DUMP=1 */
 
+/* G meter and stall warning.
+ *
+ * G: the vertical load factor, smoothed a little (the accelerometer carries
+ * vibration), and its peak since arming. OVER G past MSPOSD_G_LIMIT (default
+ * 4.0 g, either sign: a hard bunt counts too).
+ *
+ * Stall: needs an airspeed and the FC's AIRSPEED_MIN - ArduPilot advises it
+ * at least 20 % above the stall, so below it is LOW SPEED and below 85 % of
+ * it is STALL. Only once the aircraft has flown: it must have been above
+ * AIRSPEED_MIN since arming (a hand launch starts at zero), and never under
+ * 3 m relative altitude (the landing flare is meant to be slow). 1 km/h of
+ * hysteresis so a speed sitting on the line does not flicker. */
+static void px_fill_g_and_stall(PxTelemetry *t)
+{
+	static float g_f, g_peak, g_limit;
+	static int was_armed, airborne, lvl;
+	float a;
+
+	if (g_limit <= 0.0f) {
+		const char *e = getenv("MSPOSD_G_LIMIT");
+		g_limit = e && atof(e) > 1.0 ? (float)atof(e) : 4.0f;
+	}
+	if (armed && !was_armed) {
+		g_peak = 0.0f;
+		airborne = 0;
+	}
+	was_armed = armed;
+
+	if (last_g_valid) {
+		g_f += (last_g - g_f) * 0.35f;
+		a = fabsf(g_f);
+		if (armed && a > g_peak)
+			g_peak = a;
+		t->g_valid = 1;
+		t->g_load = g_f;
+		t->g_max = g_peak;
+		t->g_over = a >= g_limit;
+	}
+
+	if (last_airspeed_ms < 0.0f || fc_aspd_min_ms <= 0.0f) {
+		lvl = 0;
+		return;
+	}
+	float spd = last_airspeed_ms * 3.6f, min = fc_aspd_min_ms * 3.6f;
+	t->aspd_valid = 1;
+	t->aspd_kph = spd;
+	t->aspd_min_kph = min;
+	if (armed && spd >= min)
+		airborne = 1;
+	if (!armed || !airborne || t->alt_m < 3.0f) {
+		lvl = 0;
+	} else {
+		float h = 1.0f;   /* km/h */
+		int want = spd < 0.85f * min ? 2 : spd < min ? 1 : 0;
+		/* leave a level only with the margin; enter at once */
+		if (want < lvl && ((lvl == 2 && spd < 0.85f * min + h) ||
+		                   (lvl == 1 && spd < min + h)))
+			want = lvl;
+		lvl = want;
+	}
+	t->stall_lvl = lvl;
+}
+
 static void px_osd_fill(PxTelemetry *t)
 {
 	memset(t, 0, sizeof(*t));
@@ -2982,6 +3065,7 @@ static void px_osd_fill(PxTelemetry *t)
 	t->rssi_pct = last_rssi_pct < 0 ? 0 : last_rssi_pct;
 	t->lq_pct = 0;
 	t->armed = armed ? 1 : 0;
+	px_fill_g_and_stall(t);
 	/* Cell count from BATTERY_STATE when the FC sends it; estimated from the
 	 * pack voltage otherwise. 4.4V/cell covers a fresh HV pack without
 	 * misreading a sagged one a cell short. */
