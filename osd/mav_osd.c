@@ -385,6 +385,7 @@ static void mav_osd_handle(const mavlink_message_t *msg)
 		if (p.hdg != UINT16_MAX)
 			last_groundCourse = (int16_t)(p.hdg / 100);   /* cdeg -> deg */
 		last_altitude = (int16_t)(p.relative_alt / 1000);
+		last_gps_alt_msl = (int16_t)(p.alt / 1000);   /* mm AMSL -> m */
 		mav_osd_update_home();
 		break;
 	}
